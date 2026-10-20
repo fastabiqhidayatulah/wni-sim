@@ -1,0 +1,8 @@
+{
+  "name": "Remix WNI Simulator: Bertahan Hidup di Negeri Konoha",
+  "description": "Game board monopoli satir 2.5D Isometrik tentang perjuangan bertahan hidup warga +62 dari pajak, pungli, tol, hingga terlempar ke Planet Bekasi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

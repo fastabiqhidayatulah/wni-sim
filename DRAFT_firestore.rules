@@ -1,0 +1,167 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidRoomCode(code) {
+      return code is string && code.size() >= 3 && code.size() <= 32 && code.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidCustomAssets(ca) {
+      return ca is map &&
+        ca.size() <= 5 &&
+        (!('pawns' in ca) || (ca.pawns is map && ca.pawns.size() <= 10)) &&
+        (!('buildings' in ca) || (ca.buildings is map && ca.buildings.size() <= 6)) &&
+        (!('boardCenterLogo' in ca) || ca.boardCenterLogo == null || (ca.boardCenterLogo is string && ca.boardCenterLogo.size() <= 45000));
+    }
+
+    // 3. Entity Validation Blueprint for Room (synchronized with firebase-blueprint.json)
+    function isValidRoom(data) {
+      return data.keys().hasAll([
+        'roomCode',
+        'hostUid',
+        'hostName',
+        'status',
+        'maxPlayers',
+        'round',
+        'activePlayerIndex',
+        'stateTreasury',
+        'isExtremeMusibahActive',
+        'dice',
+        'diceQuip',
+        'players',
+        'properties',
+        'loans',
+        'activityLogs',
+        'customAssets',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'roomCode',
+        'hostUid',
+        'hostName',
+        'status',
+        'maxPlayers',
+        'round',
+        'activePlayerIndex',
+        'stateTreasury',
+        'isExtremeMusibahActive',
+        'dice',
+        'diceQuip',
+        'players',
+        'properties',
+        'loans',
+        'activityLogs',
+        'customAssets',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidRoomCode(data.roomCode) &&
+      isValidId(data.hostUid) &&
+      data.hostName is string && data.hostName.size() >= 1 && data.hostName.size() <= 60 &&
+      data.status is string && data.status.size() >= 6 && data.status.size() <= 16 &&
+      (data.status == 'WAITING' || data.status == 'PLAYING' || data.status == 'FINISHED') &&
+      data.maxPlayers is int && data.maxPlayers >= 2 && data.maxPlayers <= 64 &&
+      data.round is int && data.round >= 1 && data.round <= 10000 &&
+      data.activePlayerIndex is int && data.activePlayerIndex >= 0 && data.activePlayerIndex < 64 &&
+      data.stateTreasury is int && data.stateTreasury >= 0 &&
+      data.isExtremeMusibahActive is bool &&
+      data.dice is list && data.dice.size() == 2 && data.dice[0] is int && data.dice[1] is int &&
+      data.diceQuip is string && data.diceQuip.size() >= 1 && data.diceQuip.size() <= 240 &&
+      data.players is list && data.players.size() >= 1 && data.players.size() <= 64 && data.players[0] is map &&
+      data.properties is map && data.properties.size() <= 45 &&
+      data.loans is list && data.loans.size() <= 50 && (data.loans.size() == 0 || data.loans[0] is map) &&
+      data.activityLogs is list && data.activityLogs.size() <= 40 && (data.activityLogs.size() == 0 || data.activityLogs[0] is map) &&
+      isValidCustomAssets(data.customAssets) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    match /rooms/{roomCode} {
+      allow get: if isSignedIn() && isValidRoomCode(roomCode);
+
+      allow list: if isVerifiedUser() && resource.data.hostUid == request.auth.uid;
+
+      allow create: if isVerifiedUser() &&
+        isValidRoomCode(roomCode) &&
+        isValidRoom(incoming()) &&
+        incoming().roomCode == roomCode &&
+        incoming().hostUid == request.auth.uid &&
+        incoming().status == 'WAITING' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() &&
+        isValidRoomCode(roomCode) &&
+        isValidRoom(incoming()) &&
+        existing().status != 'FINISHED' &&
+        incoming().roomCode == existing().roomCode &&
+        incoming().hostUid == existing().hostUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (incoming().customAssets == existing().customAssets || existing().hostUid == request.auth.uid) && (
+          // Action 1: Join or configure room while WAITING, sync Host customAssets, or start game (WAITING -> PLAYING)
+          (existing().status == 'WAITING' &&
+            (incoming().status == 'WAITING' || incoming().status == 'PLAYING') &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'players',
+              'status',
+              'maxPlayers',
+              'activityLogs',
+              'customAssets',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 2: Real-time gameplay state & Host customAssets synchronization during PLAYING (or transition to FINISHED)
+          (existing().status == 'PLAYING' &&
+            (incoming().status == 'PLAYING' || incoming().status == 'FINISHED') &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'players',
+              'properties',
+              'loans',
+              'activityLogs',
+              'customAssets',
+              'round',
+              'activePlayerIndex',
+              'stateTreasury',
+              'isExtremeMusibahActive',
+              'dice',
+              'diceQuip',
+              'status',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() &&
+        isValidRoomCode(roomCode) &&
+        existing().hostUid == request.auth.uid;
+    }
+  }
+}

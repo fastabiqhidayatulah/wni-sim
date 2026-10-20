@@ -1,0 +1,139 @@
+{
+  "entities": {
+    "Room": {
+      "title": "WNI Simulator Multiplayer Room",
+      "description": "Represents a multiplayer room supporting 4 to 64 players in WNI Simulator: Bertahan Hidup di Negeri Konoha.",
+      "type": "object",
+      "properties": {
+        "roomCode": {
+          "type": "string",
+          "description": "Unique room code identifier (e.g., WNI-882).",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the room host.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Display nickname of the room host.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "status": {
+          "type": "string",
+          "description": "Current room lifecycle state.",
+          "enum": ["WAITING", "PLAYING", "FINISHED"],
+          "minLength": 6,
+          "maxLength": 16
+        },
+        "gameState": {
+          "type": "string",
+          "description": "Current game phase state (WAITING or PLAYING).",
+          "enum": ["WAITING", "PLAYING", "FINISHED"],
+          "minLength": 6,
+          "maxLength": 16
+        },
+        "hostId": {
+          "type": "integer",
+          "description": "Player numeric ID of the room host."
+        },
+        "maxPlayers": {
+          "type": "integer",
+          "description": "Maximum player capacity for the room (4 to 64)."
+        },
+        "round": {
+          "type": "integer",
+          "description": "Current game round counter."
+        },
+        "activePlayerIndex": {
+          "type": "integer",
+          "description": "Index of the player whose turn is currently active."
+        },
+        "stateTreasury": {
+          "type": "integer",
+          "description": "Total Kas Negara balance in Rupiah."
+        },
+        "isExtremeMusibahActive": {
+          "type": "boolean",
+          "description": "Whether State Escalation (Musibah Ekstrem) is active."
+        },
+        "dice": {
+          "type": "array",
+          "description": "Current pair of 6-sided dice values."
+        },
+        "diceQuip": {
+          "type": "string",
+          "description": "Latest dice commentary banner text.",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "players": {
+          "type": "array",
+          "description": "Bounded list of up to 64 players in the room."
+        },
+        "properties": {
+          "type": "object",
+          "description": "Map of board tile IDs to property ownership and building state."
+        },
+        "loans": {
+          "type": "array",
+          "description": "Bounded list of active player-to-player loans."
+        },
+        "activityLogs": {
+          "type": "array",
+          "description": "Bounded list of recent game activity logs."
+        },
+        "customAssets": {
+          "type": "object",
+          "description": "Synchronized custom images (pawns, 3D buildings, board center logo) configured by the room host."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the room was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the room was last updated."
+        }
+      },
+      "required": [
+        "roomCode",
+        "hostUid",
+        "hostId",
+        "hostName",
+        "status",
+        "gameState",
+        "maxPlayers",
+        "round",
+        "activePlayerIndex",
+        "stateTreasury",
+        "isExtremeMusibahActive",
+        "dice",
+        "diceQuip",
+        "players",
+        "properties",
+        "loans",
+        "activityLogs",
+        "customAssets",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/rooms/{roomCode}": {
+      "schema": {
+        "$ref": "#/entities/Room"
+      },
+      "description": "Stores real-time state for multiplayer WNI Simulator rooms."
+    }
+  }
+}
