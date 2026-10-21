@@ -102,5 +102,19 @@ test('firestore.rules contains required Eight Pillars and Dirty Dozen guards', (
   );
   assert.ok(rulesText.includes("data.durationMode == 'FAST_10'"));
   assert.ok(rulesText.includes("data.durationMode == 'CLASSIC'"));
+
+  // 14. Kartu Takdir/Musibah tersinkron untuk semua klien (read-only di penonton)
+  assert.ok(rulesText.includes('isValidSharedFateCard'));
+  assert.ok(rulesText.includes("'sharedFateCard'"));
+  assert.ok(
+    rulesText.includes(
+      "(!('sharedFateCard' in data) || isValidSharedFateCard(data.sharedFateCard))"
+    )
+  );
+  assert.ok(
+    rulesText.includes(
+      "sf.keys().hasAll(['cardId', 'deck', 'fromDoubles', 'diceResult', 'playerId', 'playerName'])"
+    )
+  );
 });
 

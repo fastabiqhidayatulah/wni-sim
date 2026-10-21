@@ -30,6 +30,7 @@ import {
   SyncedCustomAssets,
   sanitizeCustomAssetsForFirestore,
   deriveMemberUids,
+  SharedFateCard,
 } from './game/rules';
 import type {
   PendingLoanProposal,
@@ -144,6 +145,11 @@ export interface FirestoreRoomData {
   pendingMoneyRequest?: PendingMoneyRequest | null;
   /** Pengajuan pinjaman antar-pemain yang sedang menunggu persetujuan calon pemberi pinjaman. */
   pendingLoanProposal?: PendingLoanProposal | null;
+  /**
+   * Kartu Takdir/Musibah yang sedang dibuka pemain aktif. Disinkronkan agar
+   * semua klien bisa ikut melihat "kelucuan"-nya sebagai penonton.
+   */
+  sharedFateCard?: SharedFateCard | null;
 }
 
 const GAME_DURATION_MODES: GameDurationMode[] = [
@@ -183,6 +189,25 @@ export function sanitizePendingLoanProposalForFirestore(
       1,
       Math.min(1_000_000_000, Math.round(Number(proposal.principal) || 0))
     ),
+  };
+}
+
+export function sanitizeSharedFateCardForFirestore(
+  card: SharedFateCard | null | undefined
+): SharedFateCard | null {
+  if (!card) return null;
+  const cardId = String(card.cardId || '').trim().slice(0, 64);
+  if (!cardId) return null;
+  return {
+    cardId,
+    deck: card.deck === 'TAKDIR' ? 'TAKDIR' : 'MUSIBAH',
+    fromDoubles: Boolean(card.fromDoubles),
+    diceResult:
+      card.diceResult === null || card.diceResult === undefined
+        ? null
+        : Math.max(1, Math.min(6, Math.round(Number(card.diceResult) || 1))),
+    playerId: clampPlayerId(card.playerId),
+    playerName: (String(card.playerName || '').trim() || 'WNI').slice(0, 40),
   };
 }
 
@@ -498,6 +523,7 @@ export async function syncGameplayToFirestore(params: {
   gameOverReason?: string;
   pendingMoneyRequest?: PendingMoneyRequest | null;
   pendingLoanProposal?: PendingLoanProposal | null;
+  sharedFateCard?: SharedFateCard | null;
   customAssets?: {
     pawns?: Record<string, string> | null;
     buildings?: Record<string | number, string> | null;
@@ -535,6 +561,13 @@ export async function syncGameplayToFirestore(params: {
       ),
       updatedAt: serverTimestamp(),
     };
+    // Hanya pemilik giliran yang boleh mengubah kartu kejadian; klien penonton
+    // tidak mengirim field ini agar tidak menghapus kartu yang sedang tampil.
+    if (params.sharedFateCard !== undefined) {
+      payload.sharedFateCard = sanitizeSharedFateCardForFirestore(
+        params.sharedFateCard
+      );
+    }
     // Mode durasi adalah setelan Host: klien non-host tidak menulisnya agar
     // snapshot lama tidak menimpa pilihan Host saat race di awal permainan.
     if (

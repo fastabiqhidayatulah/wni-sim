@@ -20,6 +20,8 @@ import {
   BoardTile,
   BuildingLevel,
   FateCard,
+  SharedFateCard,
+  getSharedFateCardKey,
   LoanRecord,
   Player,
   PropertyState,
@@ -72,6 +74,7 @@ import {
 } from './components/GameModals';
 import { LobbyAndWaitingRoom } from './components/LobbyAndWaitingRoom';
 import { HoverInfoPopups } from './components/HoverInfoPopups';
+import { SpectatorFateCardOverlay } from './components/SpectatorFateCardOverlay';
 import { IntroMovieScreen } from './components/IntroMovieScreen';
 import {
   auth,
@@ -260,6 +263,7 @@ export default function App() {
     diceQuip: string | null;
     durationMode: GameDurationMode | null;
     gameOverReason: string | null;
+    sharedFateCard: SharedFateCard | null;
   }>({
     players: null,
     properties: null,
@@ -273,6 +277,7 @@ export default function App() {
     diceQuip: null,
     durationMode: null,
     gameOverReason: null,
+    sharedFateCard: null,
   });
 
   const handleUpdateCustomAssets = useCallback(
@@ -457,6 +462,13 @@ export default function App() {
     fromDoubles: boolean;
   } | null>(null);
   const [fateDiceResult, setFateDiceResult] = useState<number | null>(null);
+  // Kartu kejadian milik pemain lain, ditampilkan read-only untuk semua klien.
+  const [remoteFateCard, setRemoteFateCard] = useState<SharedFateCard | null>(
+    null
+  );
+  const [dismissedFateCardKey, setDismissedFateCardKey] = useState<string | null>(
+    null
+  );
 
   const [showBuyUpgradeModal, setShowBuyUpgradeModal] =
     useState<boolean>(false);
@@ -780,6 +792,24 @@ export default function App() {
                 : roomData.hostUid === firebaseUser.uid;
             setIsHost(isCurrentHost);
           }
+          // Kartu Takdir/Musibah milik pemain aktif ikut disinkronkan. Simpan
+          // hanya bila bukan milik kita; klien pemilik giliran memakai modal
+          // interaktifnya sendiri agar tidak dobel.
+          const incomingSharedFateCard = roomData.sharedFateCard ?? null;
+          lastRemoteSyncedRef.current.sharedFateCard = incomingSharedFateCard;
+          const currentSnapshotPlayerId =
+            roomData.players?.find((p) => p.uid === firebaseUser.uid)?.id ??
+            myPlayerId;
+          setRemoteFateCard(
+            incomingSharedFateCard &&
+              incomingSharedFateCard.playerId !== currentSnapshotPlayerId
+              ? incomingSharedFateCard
+              : null
+          );
+          if (!incomingSharedFateCard) {
+            setDismissedFateCardKey(null);
+          }
+
           if (roomData.properties) {
             const remoteProps = deserializePropertiesFromFirestore(
               roomData.properties
@@ -956,6 +986,19 @@ export default function App() {
     // pinjaman, atau klien ini yang sedang menjalankan giliran). Klien yang murni
     // menerima snapshot tidak ikut menulis — mengurangi pemborosan kuota & bentrok.
     const remoteSnapshot = lastRemoteSyncedRef.current;
+    // Bentuk kartu kejadian yang sedang dibuka klien pemilik giliran. Klien
+    // penonton tidak pernah mengirim field ini agar tidak menghapus kartu yang
+    // sedang tampil di layar pemain lain.
+    const sharedFateCardForSync: SharedFateCard | null = activeFateCard
+      ? {
+          cardId: activeFateCard.card.id,
+          deck: activeFateCard.card.deck,
+          fromDoubles: activeFateCard.fromDoubles,
+          diceResult: fateDiceResult,
+          playerId: activePlayer.id,
+          playerName: activePlayer.name,
+        }
+      : null;
     const hasLocalDivergence =
       players !== remoteSnapshot.players ||
       properties !== remoteSnapshot.properties ||
@@ -968,7 +1011,10 @@ export default function App() {
       dice !== remoteSnapshot.dice ||
       diceQuip !== remoteSnapshot.diceQuip ||
       durationMode !== remoteSnapshot.durationMode ||
-      gameOverReason !== remoteSnapshot.gameOverReason;
+      gameOverReason !== remoteSnapshot.gameOverReason ||
+      (isMyTurnToAct &&
+        getSharedFateCardKey(sharedFateCardForSync) !==
+          getSharedFateCardKey(remoteSnapshot.sharedFateCard));
     if (!hasLocalDivergence) {
       return;
     }
@@ -990,6 +1036,7 @@ export default function App() {
         gameOverReason,
         pendingMoneyRequest,
         pendingLoanProposal,
+        sharedFateCard: isMyTurnToAct ? sharedFateCardForSync : undefined,
         customAssets: isHost ? customAssets : undefined,
       }).catch((err) => {
         console.warn('Sync gameplay to Firestore failed:', err);
@@ -1015,6 +1062,9 @@ export default function App() {
     gameOverReason,
     pendingMoneyRequest,
     pendingLoanProposal,
+    activeFateCard,
+    fateDiceResult,
+    isMyTurnToAct,
     gameState,
     isRolling,
     isMoving,
@@ -4970,6 +5020,16 @@ export default function App() {
     (l) => l.borrowerId === activePlayer.id && l.remainingDue > 0
   ).length;
 
+  // Kartu kejadian pemain lain: tampil di semua klien, tapi tetap read-only.
+  // Bisa disembunyikan sementara agar penonton tetap bisa melihat papan.
+  const spectatorFateCard =
+    screen === 'GAME' &&
+    remoteFateCard &&
+    remoteFateCard.playerId !== myOnlinePlayerId &&
+    dismissedFateCardKey !== getSharedFateCardKey(remoteFateCard)
+      ? remoteFateCard
+      : null;
+
   return (
     <main className="relative w-screen h-screen overflow-hidden bg-[#2b1508] font-['Plus_Jakarta_Sans',sans-serif] select-none">
       {/* 1. CENTRAL 2.5D ISOMETRIC BOARD VIEWPORT */}
@@ -6523,6 +6583,16 @@ export default function App() {
           isHost={isHost}
           onlineRoomCode={roomCode}
           onDeleteOnlineRoom={handleDeleteOnlineRoom}
+        />
+      )}
+
+      {/* 3b. KARTU KEJADIAN UNTUK PENONTON (read-only, semua klien bisa lihat) */}
+      {spectatorFateCard && (
+        <SpectatorFateCardOverlay
+          event={spectatorFateCard}
+          onDismiss={() =>
+            setDismissedFateCardKey(getSharedFateCardKey(spectatorFateCard))
+          }
         />
       )}
 

@@ -263,6 +263,20 @@ export interface FateCard {
   isExtreme?: boolean;
 }
 
+/**
+ * Kartu kejadian yang dibagikan ke SEMUA klien lewat dokumen room.
+ * Isinya sengaja hanya referensi kartu (id) + hasil dadu, bukan seluruh objek
+ * kartu: semua klien sudah punya katalog TAKDIR/MUSIBAH yang sama.
+ */
+export interface SharedFateCard {
+  cardId: string;
+  deck: 'TAKDIR' | 'MUSIBAH';
+  fromDoubles: boolean;
+  diceResult: number | null;
+  playerId: number;
+  playerName: string;
+}
+
 export const PERIMETER_TILE_COUNT = 40;
 export const TOLL_TILE_IDS = [5, 15, 25, 35];
 export const BANDUNG_TILE_ID = 19;
@@ -1005,6 +1019,35 @@ export const EXTREME_MUSIBAH_CARDS: FateCard[] = [
     isExtreme: true,
   },
 ];
+
+/**
+ * Cari definisi kartu Takdir/Musibah berdasarkan id. Dipakai klien penonton
+ * untuk menampilkan kartu yang sama persis dengan yang dilihat pemain aktif.
+ */
+export function findFateCardById(cardId: string): FateCard | null {
+  return (
+    TAKDIR_CARDS.find((card) => card.id === cardId) ??
+    MUSIBAH_CARDS.find((card) => card.id === cardId) ??
+    EXTREME_MUSIBAH_CARDS.find((card) => card.id === cardId) ??
+    null
+  );
+}
+
+/**
+ * Signature ringkas untuk membandingkan kartu kejadian lintas snapshot tanpa
+ * memicu push berulang hanya karena objeknya baru.
+ */
+export function getSharedFateCardKey(card: SharedFateCard | null): string {
+  if (!card) return '';
+  return [
+    card.cardId,
+    card.deck,
+    card.fromDoubles ? '1' : '0',
+    card.diceResult === null ? '-' : String(card.diceResult),
+    String(card.playerId),
+    card.playerName,
+  ].join('|');
+}
 
 /**
  * Mengacak array kartu (Fisher-Yates shuffle) untuk membuat tumpukan dek

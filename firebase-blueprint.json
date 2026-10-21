@@ -115,6 +115,10 @@
           "type": ["object", "null"],
           "description": "Active player-to-player loan proposal awaiting the lender's approval and interest rate."
         },
+        "sharedFateCard": {
+          "type": ["object", "null"],
+          "description": "Takdir/Musibah card currently drawn by the active player, synchronized so every client can watch the event read-only."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

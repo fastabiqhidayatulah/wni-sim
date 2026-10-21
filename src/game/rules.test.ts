@@ -48,6 +48,8 @@ import {
   countSyncedCustomAssets,
   resolvePublicAvatarsMap,
   resolveEffectivePawnImageUrl,
+  findFateCardById,
+  getSharedFateCardKey,
 } from './rules.ts';
 
 test('board has 40 perimeter tiles and 1 Bekasi center tile (#40)', () => {
@@ -531,6 +533,35 @@ test('deriveMemberUids: hanya uid manusia, tanpa duplikat, maksimal 64 entri', (
   assert.equal(deriveMemberUids([longUidPlayer])[0].length, 128);
 });
 
+test('shared FateCard: lookup lintas dek dan signature stabil untuk sinkronisasi', () => {
+  // 1. Kartu Takdir, Musibah, dan Musibah Ekstrem semuanya bisa ditemukan.
+  assert.equal(findFateCardById('takdir-viral-meme')?.deck, 'TAKDIR');
+  assert.equal(findFateCardById('musibah-lapas')?.deck, 'MUSIBAH');
+  assert.equal(findFateCardById('musibah-ekstrem-audit')?.isExtreme, true);
 
+  // 2. Id tidak dikenal tidak boleh membuat modal penonton crash/blank.
+  assert.equal(findFateCardById('kartu-hantu'), null);
 
-
+  // 3. Signature berubah ketika hasil dadu berubah, tetapi sama untuk isi sama.
+  const base = {
+    cardId: 'takdir-bansos-dadu',
+    deck: 'TAKDIR' as const,
+    fromDoubles: false,
+    diceResult: null,
+    playerId: 2,
+    playerName: 'Bang Jago',
+  };
+  assert.equal(getSharedFateCardKey(null), '');
+  assert.equal(
+    getSharedFateCardKey(base),
+    getSharedFateCardKey({ ...base })
+  );
+  assert.notEqual(
+    getSharedFateCardKey(base),
+    getSharedFateCardKey({ ...base, diceResult: 5 })
+  );
+  assert.notEqual(
+    getSharedFateCardKey(base),
+    getSharedFateCardKey({ ...base, fromDoubles: true })
+  );
+});

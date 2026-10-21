@@ -63,6 +63,23 @@ service cloud.firestore {
       );
     }
 
+    // Kartu Takdir/Musibah yang sedang dibuka pemain aktif. Hanya referensi
+    // kartu + hasil dadu; semua klien memakai katalog kartu yang sama.
+    function isValidSharedFateCard(sf) {
+      return sf == null || (
+        sf is map &&
+        sf.keys().hasOnly(['cardId', 'deck', 'fromDoubles', 'diceResult', 'playerId', 'playerName']) &&
+        sf.keys().hasAll(['cardId', 'deck', 'fromDoubles', 'diceResult', 'playerId', 'playerName']) &&
+        sf.cardId is string && sf.cardId.size() >= 1 && sf.cardId.size() <= 64 &&
+        (sf.deck == 'TAKDIR' || sf.deck == 'MUSIBAH') &&
+        sf.fromDoubles is bool &&
+        (sf.diceResult == null ||
+          (sf.diceResult is int && sf.diceResult >= 1 && sf.diceResult <= 6)) &&
+        sf.playerId is int && sf.playerId >= 0 && sf.playerId < 64 &&
+        sf.playerName is string && sf.playerName.size() >= 1 && sf.playerName.size() <= 40
+      );
+    }
+
     // 3. Room Membership Enforcement — hanya pemain yang terdaftar di `memberUids`
     //    (daftar uid Firebase Auth hasil turunan pemain manusia) yang boleh menulis
     //    state penuh room. Orang asing yang menebak kode room hanya boleh menulis
@@ -126,6 +143,7 @@ service cloud.firestore {
         'gameOverReason',
         'pendingMoneyRequest',
         'pendingLoanProposal',
+        'sharedFateCard',
         'createdAt',
         'updatedAt'
       ]) &&
@@ -159,6 +177,7 @@ service cloud.firestore {
       (!('gameOverReason' in data) || (data.gameOverReason is string && data.gameOverReason.size() <= 240)) &&
       (!('pendingMoneyRequest' in data) || isValidPendingMoneyRequest(data.pendingMoneyRequest)) &&
       (!('pendingLoanProposal' in data) || isValidPendingLoanProposal(data.pendingLoanProposal)) &&
+      (!('sharedFateCard' in data) || isValidSharedFateCard(data.sharedFateCard)) &&
       data.createdAt is timestamp &&
       data.updatedAt is timestamp;
     }
@@ -244,6 +263,7 @@ service cloud.firestore {
                   'gameOverReason',
                   'pendingMoneyRequest',
                   'pendingLoanProposal',
+                  'sharedFateCard',
                   'updatedAt'
                 ])
               ) ||
@@ -282,6 +302,7 @@ service cloud.firestore {
               'gameOverReason',
               'pendingMoneyRequest',
               'pendingLoanProposal',
+              'sharedFateCard',
               'updatedAt'
             ])
           )
