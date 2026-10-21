@@ -531,6 +531,10 @@ export default function App() {
       : Boolean(firebaseUser && activePlayer?.uid === firebaseUser.uid));
   // Tombol lempar/akhiri giliran dikunci saat bukan giliran kita secara online.
   const turnControlsLocked = isOnlineRoom && !isMyTurnToAct;
+  // Di mode online, klien non-aktif hanya menonton. Di mode lokal, bot juga
+  // bermain otomatis, jadi tombol aksi pemain aktif dikunci untuk bot.
+  const turnActionsLocked =
+    turnControlsLocked || Boolean(activePlayer?.isBot);
   const applyingRemoteSnapshotRef = useRef<boolean>(false);
 
   // Identitas kita di room online (fallback ke myPlayerId hasil snapshot).
@@ -1328,6 +1332,10 @@ export default function App() {
   ]);
 
   const handleNextTurn = useCallback(() => {
+    // Hanya klien pemain aktif (atau Host untuk bot) yang boleh memajukan
+    // giliran. Ini mencegah klien penonton mengubah urutan giliran saat
+    // menerima snapshot atau menekan tombol yang tidak sengaja terbuka.
+    if (turnControlsLocked) return;
     if (isRolling || isMoving || isLandingPause) return;
 
     // Batalkan penjadwalan maju giliran yang masih tertunda — klik manual
@@ -1395,6 +1403,9 @@ export default function App() {
     setShowGiveMoneyModal(false);
     setShowAskMoneyModal(false);
     setShowDukunModal(false);
+    setShowLoanManagerModal(false);
+    setShowJailModal(false);
+    setShowPremiumCellModal(false);
     setSelectedCardToUse(null);
     setPendingLoanProposal(null);
     setPendingDebtObligation(null);
@@ -1516,6 +1527,7 @@ export default function App() {
     isRolling,
     isMoving,
     isLandingPause,
+    turnControlsLocked,
     addLog,
     executeForcedLoanCollection,
     triggerTurnTransition,
@@ -2229,6 +2241,7 @@ export default function App() {
 
   // --- FASE 2 & 3: LAPAS (#10) 4 OPTIONS HANDLERS ---
   const handleJailTryDoubles = () => {
+    if (turnControlsLocked) return;
     if (
       hasRolledThisTurn ||
       rollLockRef.current ||
@@ -2277,6 +2290,7 @@ export default function App() {
   };
 
   const handleJailPayFine = () => {
+    if (turnControlsLocked) return;
     if (
       hasRolledThisTurn ||
       rollLockRef.current ||
@@ -2312,6 +2326,7 @@ export default function App() {
   };
 
   const handleJailUseOrdal = () => {
+    if (turnControlsLocked) return;
     if (
       hasRolledThisTurn ||
       rollLockRef.current ||
@@ -2352,6 +2367,7 @@ export default function App() {
   };
 
   const handleJailBuyPremiumCell = () => {
+    if (turnControlsLocked) return;
     setShowJailModal(false);
     soundFX.playCashIn();
     setPlayers((prev) =>
@@ -2379,6 +2395,7 @@ export default function App() {
 
   // --- SEL PREMIUM HANDLERS ---
   const handlePremiumBuyAnyProperty = (tileId: number) => {
+    if (turnControlsLocked) return;
     const tile = BOARD_TILES.find((t) => t.id === tileId);
     const prop = properties[tileId];
     if (!tile || !prop) return;
@@ -2417,6 +2434,7 @@ export default function App() {
   };
 
   const handlePremiumStayInCell = () => {
+    if (turnControlsLocked) return;
     setShowPremiumCellModal(false);
     const remaining = Math.max(0, activePlayer.premiumTurnsLeft - 1);
 
@@ -2463,6 +2481,7 @@ export default function App() {
   };
 
   const handleCancelFateCardWithDoa = () => {
+    if (turnControlsLocked) return;
     if (!activeFateCard) return;
     const doaCard = activePlayer.savedCards.find((c) => c.key === 'DOA_ORTU');
     soundFX.playCashIn();
@@ -2500,6 +2519,7 @@ export default function App() {
   };
 
   const handleConfirmFateCard = () => {
+    if (turnControlsLocked) return;
     if (!activeFateCard) return;
     const { card } = activeFateCard;
     const diceVal = fateDiceResult ?? Math.floor(Math.random() * 6) + 1;
@@ -2735,6 +2755,7 @@ export default function App() {
 
   // --- GERBANG TOL + KARTU DISKON TOL ---
   const handleUseDiskonTolInModal = () => {
+    if (turnControlsLocked) return;
     const diskonCard = activePlayer.savedCards.find(
       (c) => c.key === 'DISKON_TOL'
     );
@@ -2764,6 +2785,7 @@ export default function App() {
   };
 
   const handleSelectTollDestination = (targetTollTileId: number) => {
+    if (turnControlsLocked) return;
     const targetTile = BOARD_TILES.find((t) => t.id === targetTollTileId);
     setShowTollModal(false);
     setTollFeeRefunded(false);
@@ -2809,6 +2831,7 @@ export default function App() {
   };
 
   const handleConfirmCourtVerdict = () => {
+    if (turnControlsLocked) return;
     if (courtDiceResult === null) return;
     const verdict = resolveCourtVerdict(courtDiceResult, activePlayer.money);
     setShowCourtModal(false);
@@ -2870,6 +2893,7 @@ export default function App() {
 
   // --- BUY PROPERTY (NORMAL OR 🛍️ HARBOLNAS 12.12 50% DISCOUNT) & UPGRADE ---
   const handleBuyProperty = (tileId: number, useHarbolnas: boolean = false) => {
+    if (turnControlsLocked) return;
     const tile = BOARD_TILES.find((t) => t.id === tileId);
     const prop = properties[tileId];
     if (!tile || !prop || prop.ownerId !== null || prop.isSeizedByState) return;
@@ -2932,6 +2956,7 @@ export default function App() {
   };
 
   const handleUpgradeProperty = (tileId: number) => {
+    if (turnControlsLocked) return;
     const tile = BOARD_TILES.find((t) => t.id === tileId);
     const prop = properties[tileId];
     if (
@@ -2984,6 +3009,8 @@ export default function App() {
     amount: number,
     note: string
   ) => {
+    if (turnControlsLocked) return;
+    if (targetPlayerId === activePlayer.id) return;
     if (activePlayer.money < amount) return;
     const target = players.find((p) => p.id === targetPlayerId);
     if (!target) return;
@@ -3019,6 +3046,8 @@ export default function App() {
     amount: number,
     reason: string
   ) => {
+    if (turnControlsLocked) return;
+    if (targetPlayerId === activePlayer.id) return;
     const target = players.find((p) => p.id === targetPlayerId);
     setShowAskMoneyModal(false);
     setPendingMoneyRequest({
@@ -3132,6 +3161,7 @@ export default function App() {
 
   // --- FASE 3: 10 KARTU SIMPANAN HANDLERS ---
   const handleApplyDukunDiceChange = (dieIndex: number, newValue: number) => {
+    if (turnControlsLocked) return;
     if (
       hasRolledThisTurn ||
       rollLockRef.current ||
@@ -3205,6 +3235,7 @@ export default function App() {
       fitnahDiceResult?: number;
     }
   ) => {
+    if (turnControlsLocked) return;
     setSelectedCardToUse(null);
     soundFX.playCardReveal(true);
 
@@ -3465,6 +3496,7 @@ export default function App() {
 
   // --- FASE 3: FINANCIAL CRISIS, ASSET LIQUIDATION (50%), & LOAN SHARK (1-200% INTEREST) ---
   const handleSellBuildingForCash = (tileId: number) => {
+    if (turnControlsLocked) return;
     const prop = properties[tileId];
     const tile = BOARD_TILES.find((t) => t.id === tileId);
     if (!prop || !tile || prop.level <= 0) return;
@@ -3495,6 +3527,7 @@ export default function App() {
   };
 
   const handleSellLandForCash = (tileId: number) => {
+    if (turnControlsLocked) return;
     const prop = properties[tileId];
     const tile = BOARD_TILES.find((t) => t.id === tileId);
     if (!prop || !tile) return;
@@ -3525,10 +3558,11 @@ export default function App() {
   };
 
   const handleRequestLoanFromPlayer = (lenderId: number, principal: number) => {
+    if (turnControlsLocked) return;
     const borrowerIdx = pendingDebtObligation?.playerIndex ?? activePlayerIndex;
     const borrower = players[borrowerIdx];
     const lender = players.find((p) => p.id === lenderId);
-    if (!borrower || !lender) return;
+    if (!borrower || !lender || borrower.id === lender.id) return;
 
     const actualPrincipal = Math.min(lender.money, principal);
     if (actualPrincipal <= 0) return;
@@ -3610,6 +3644,7 @@ export default function App() {
   };
 
   const handleSettlePendingObligation = () => {
+    if (turnControlsLocked) return;
     if (!pendingDebtObligation) return;
     const { playerIndex, amount, reason, recipientPlayerId } =
       pendingDebtObligation;
@@ -3644,6 +3679,7 @@ export default function App() {
   };
 
   const handleDeclareBankruptcyFromCrisis = () => {
+    if (turnControlsLocked) return;
     if (!pendingDebtObligation) return;
     const { playerIndex, reason } = pendingDebtObligation;
     const debtor = players[playerIndex];
@@ -3679,6 +3715,7 @@ export default function App() {
   };
 
   const handleRepayLoan = (loanId: string, payAmount: number) => {
+    if (turnControlsLocked) return;
     const loan = loans.find((l) => l.id === loanId);
     if (!loan || activePlayer.money <= 0) return;
 
@@ -4947,16 +4984,20 @@ export default function App() {
         khodamBonus={khodamAppliedOnRoll}
         isExtremeMusibahActive={isExtremeMusibahActive}
         awaitingDukunConfirm={awaitingDukunConfirm}
-        onOpenDukunModal={() => setShowDukunModal(true)}
-        onProceedWithoutDukun={() =>
+        onOpenDukunModal={() => {
+          if (turnActionsLocked) return;
+          setShowDukunModal(true);
+        }}
+        onProceedWithoutDukun={() => {
+          if (turnActionsLocked) return;
           executePawnHopMovement(
             dice[0],
             dice[1],
             extraDie,
             khodamAppliedOnRoll,
             pendingRollFreedFromJail
-          )
-        }
+          );
+        }}
         isRolling={isRolling}
         isMoving={isMoving}
         diceQuip={diceQuip}
@@ -5659,7 +5700,7 @@ export default function App() {
                           </span>
                           {isTurn && (
                             <span className="px-1 rounded bg-yellow-400 text-stone-950 text-[7.5px] font-black">
-                              GILIRANMU
+                              {turnActionsLocked ? 'GILIRAN' : 'GILIRANMU'}
                             </span>
                           )}
                         </div>
@@ -5683,8 +5724,18 @@ export default function App() {
                       <button
                         key={card.id}
                         type="button"
+                        disabled={turnActionsLocked}
+                        title={
+                          turnActionsLocked
+                            ? 'Kartu simpanan hanya bisa dipakai pada giliran pemiliknya.'
+                            : undefined
+                        }
                         onClick={() => setSelectedCardToUse(card)}
-                        className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#271206]/95 border border-amber-600/70 text-white text-[10px] font-bold whitespace-nowrap shrink-0"
+                        className={`flex items-center gap-1 px-2 py-1 rounded-lg border text-white text-[10px] font-bold whitespace-nowrap shrink-0 ${
+                          turnActionsLocked
+                            ? 'bg-stone-800/80 border-stone-600 opacity-50 cursor-not-allowed'
+                            : 'bg-[#271206]/95 border-amber-600/70 cursor-pointer'
+                        }`}
                       >
                         <span>{card.emoji}</span>
                         <span>{card.name}</span>
@@ -5815,7 +5866,7 @@ export default function App() {
                           {isTurn ? (
                             <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-yellow-400 text-stone-950 text-[10px] font-black uppercase tracking-wider shadow">
                               <Sparkles className="w-3 h-3 fill-stone-950" />
-                              GILIRANMU
+                              {turnActionsLocked ? 'GILIRAN' : 'GILIRANMU'}
                             </div>
                           ) : (
                             <span className="text-[9px] font-mono text-amber-400/80">
@@ -5824,6 +5875,11 @@ export default function App() {
                           )}
 
                           <div className="flex items-center gap-1">
+                            {isOnlineRoom && p.uid === firebaseUser?.uid && (
+                              <span className="px-1 py-0.2 rounded bg-emerald-950 border border-emerald-500 text-emerald-200 text-[8px] font-bold uppercase">
+                                KAMU
+                              </span>
+                            )}
                             {p.isBot && (
                               <span className="px-1 py-0.2 rounded bg-sky-950 border border-sky-600 text-sky-200 text-[8px] font-bold uppercase">
                                 BOT
@@ -5916,7 +5972,9 @@ export default function App() {
                           </div>
                         )}
 
-                        {isTurn && p.status === 'DI_LAPAS' && (
+                        {isTurn &&
+                          !turnActionsLocked &&
+                          p.status === 'DI_LAPAS' && (
                           <button
                             type="button"
                             onClick={(e) => {
@@ -5930,7 +5988,9 @@ export default function App() {
                           </button>
                         )}
 
-                        {isTurn && p.status === 'SEL_PREMIUM' && (
+                        {isTurn &&
+                          !turnActionsLocked &&
+                          p.status === 'SEL_PREMIUM' && (
                           <button
                             type="button"
                             onClick={(e) => {
@@ -6013,11 +6073,19 @@ export default function App() {
                         <button
                           key={card.id}
                           type="button"
+                          disabled={turnActionsLocked}
+                          title={
+                            turnActionsLocked
+                              ? 'Kartu simpanan hanya bisa dipakai pada giliran pemiliknya.'
+                              : undefined
+                          }
                           onClick={() => setSelectedCardToUse(card)}
-                          className={`w-full flex items-center gap-2 p-2 rounded-xl border text-left transition-all cursor-pointer group ${
-                            isWantimpresActive
-                              ? 'bg-purple-950/90 border-purple-400'
-                              : 'bg-amber-950/85 hover:bg-amber-900 border-amber-700/70'
+                          className={`w-full flex items-center gap-2 p-2 rounded-xl border text-left transition-all group ${
+                            turnActionsLocked
+                              ? 'bg-stone-800/80 border-stone-600 opacity-50 cursor-not-allowed'
+                              : isWantimpresActive
+                              ? 'bg-purple-950/90 border-purple-400 cursor-pointer'
+                              : 'bg-amber-950/85 hover:bg-amber-900 border-amber-700/70 cursor-pointer'
                           }`}
                         >
                           <span className="w-7 h-7 rounded-lg bg-black/40 flex items-center justify-center text-sm shrink-0 group-hover:scale-110 transition-transform">
@@ -6167,7 +6235,7 @@ export default function App() {
                     disabled={
                       hasRolledThisTurn ||
                       turnPhase !== 'READY_TO_ROLL' ||
-                      Boolean(activePlayer.isBot) ||
+                      turnActionsLocked ||
                       isRolling ||
                       isMoving
                     }
@@ -6183,11 +6251,19 @@ export default function App() {
                 {!collapsedPanels.actions && (
                   <button
                     type="button"
+                    disabled={turnActionsLocked}
+                    title={
+                      turnActionsLocked
+                        ? 'Hanya pemain yang sedang mendapat giliran yang bisa membayar utang.'
+                        : undefined
+                    }
                     onClick={() => setShowLoanManagerModal(true)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border font-extrabold text-[11px] sm:text-xs shadow cursor-pointer ${
-                      activePlayerDebtCount > 0
-                        ? 'bg-rose-600 hover:bg-rose-500 border-amber-300 text-white animate-pulse'
-                        : 'bg-[#271206]/95 hover:bg-amber-950 border-amber-600/70 text-amber-200'
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border font-extrabold text-[11px] sm:text-xs shadow transition-all ${
+                      turnActionsLocked
+                        ? 'bg-stone-800/70 border-stone-600 text-stone-400 opacity-50 cursor-not-allowed'
+                        : activePlayerDebtCount > 0
+                        ? 'bg-rose-600 hover:bg-rose-500 border-amber-300 text-white animate-pulse cursor-pointer'
+                        : 'bg-[#271206]/95 hover:bg-amber-950 border-amber-600/70 text-amber-200 cursor-pointer'
                     }`}
                   >
                     <Landmark className="w-3.5 h-3.5 text-amber-300" />
@@ -6225,11 +6301,17 @@ export default function App() {
                   type="button"
                   data-testid="next-turn-btn"
                   disabled={
-                    isRolling || isMoving || isLandingPause || turnControlsLocked
+                    isRolling ||
+                    isMoving ||
+                    isLandingPause ||
+                    turnActionsLocked
                   }
                   onClick={handleNextTurn}
                   className={`flex items-center gap-1.5 px-3.5 py-1.5 sm:py-2 rounded-xl font-black text-[11px] sm:text-xs shadow cursor-pointer whitespace-nowrap shrink-0 transition-all ${
-                    isRolling || isMoving || isLandingPause || turnControlsLocked
+                    isRolling ||
+                    isMoving ||
+                    isLandingPause ||
+                    turnActionsLocked
                       ? 'bg-stone-800/70 border border-stone-600 text-stone-400 opacity-50 cursor-not-allowed pointer-events-none'
                       : hasRolledThisTurn
                       ? 'bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 text-stone-950 border-2 border-white ring-2 ring-amber-300 shadow-[0_0_20px_rgba(251,191,36,0.85)] animate-pulse'
@@ -6290,8 +6372,18 @@ export default function App() {
                   <>
                     <button
                       type="button"
+                      disabled={turnActionsLocked}
+                      title={
+                        turnActionsLocked
+                          ? 'Hanya pemain yang sedang mendapat giliran yang bisa mengirim uang.'
+                          : undefined
+                      }
                       onClick={() => setShowGiveMoneyModal(true)}
-                      className="flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:translate-y-0.5 text-stone-950 font-black text-xs sm:text-sm tracking-wide shadow-[0_4px_0_#047857] transition-all cursor-pointer whitespace-nowrap shrink-0"
+                      className={`flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-black text-xs sm:text-sm tracking-wide transition-all whitespace-nowrap shrink-0 ${
+                        turnActionsLocked
+                          ? 'bg-stone-700 text-stone-300 border border-stone-500 opacity-50 cursor-not-allowed shadow-none'
+                          : 'bg-emerald-500 hover:bg-emerald-400 active:translate-y-0.5 text-stone-950 shadow-[0_4px_0_#047857] cursor-pointer'
+                      }`}
                     >
                       <Send className="w-4 h-4 shrink-0" />
                       <span>KASIH DUIT</span>
@@ -6299,8 +6391,18 @@ export default function App() {
 
                     <button
                       type="button"
+                      disabled={turnActionsLocked}
+                      title={
+                        turnActionsLocked
+                          ? 'Hanya pemain yang sedang mendapat giliran yang bisa meminta uang.'
+                          : undefined
+                      }
                       onClick={() => setShowAskMoneyModal(true)}
-                      className="flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-sky-400 hover:bg-sky-300 active:translate-y-0.5 text-stone-950 font-black text-xs sm:text-sm tracking-wide shadow-[0_4px_0_#0369a1] transition-all cursor-pointer whitespace-nowrap shrink-0"
+                      className={`flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-black text-xs sm:text-sm tracking-wide transition-all whitespace-nowrap shrink-0 ${
+                        turnActionsLocked
+                          ? 'bg-stone-700 text-stone-300 border border-stone-500 opacity-50 cursor-not-allowed shadow-none'
+                          : 'bg-sky-400 hover:bg-sky-300 active:translate-y-0.5 text-stone-950 shadow-[0_4px_0_#0369a1] cursor-pointer'
+                      }`}
                     >
                       <HandCoins className="w-4 h-4 shrink-0" />
                       <span>MINTA DUIT</span>
@@ -6310,14 +6412,24 @@ export default function App() {
 
                 <button
                   type="button"
+                  disabled={turnActionsLocked}
+                  title={
+                    turnActionsLocked
+                      ? 'Hanya pemain yang sedang mendapat giliran yang bisa membeli atau meng-upgrade properti.'
+                      : undefined
+                  }
                   onClick={() => {
                     setStartUpgradeBanner(false);
                     setShowBuyUpgradeModal(true);
                   }}
-                  className={`flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-purple-400 hover:bg-purple-300 active:translate-y-0.5 text-stone-950 font-black text-xs sm:text-sm tracking-wide shadow-[0_4px_0_#6d28d9] transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-                    isStandingOnUnownedProperty
-                      ? 'ring-2 ring-yellow-300 animate-pulse'
-                      : ''
+                  className={`flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-black text-xs sm:text-sm tracking-wide transition-all whitespace-nowrap shrink-0 ${
+                    turnActionsLocked
+                      ? 'bg-stone-700 text-stone-300 border border-stone-500 opacity-50 cursor-not-allowed shadow-none'
+                      : `bg-purple-400 hover:bg-purple-300 active:translate-y-0.5 text-stone-950 shadow-[0_4px_0_#6d28d9] cursor-pointer ${
+                          isStandingOnUnownedProperty
+                            ? 'ring-2 ring-yellow-300 animate-pulse'
+                            : ''
+                        }`
                   }`}
                 >
                   <Building2 className="w-4 h-4 shrink-0" />
