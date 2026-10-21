@@ -703,7 +703,7 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                           >
                             {/* Small dark elliptical shadow on the tile surface beneath the pawn's feet */}
                             <div
-                              className="w-6 h-3 rounded-full bg-black/65 transition-all duration-200"
+                              className="w-8 h-3.5 rounded-full bg-black/65 transition-all duration-200"
                               style={{
                                 filter: 'blur(1.5px)',
                                 transform:
@@ -746,15 +746,18 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                                       <img
                                         src={pawnImgUrl}
                                         alt={p.name}
-                                        className="w-9 h-9 sm:w-10 sm:h-10 object-contain"
+                                        className="w-16 h-16 sm:w-[4.5rem] sm:h-[4.5rem] object-contain"
                                         style={{
-                                          filter: isCurrentTurn
-                                            ? 'drop-shadow(0 0 4px #fde047) drop-shadow(0 5px 5px rgba(0,0,0,0.65))'
-                                            : 'drop-shadow(0 5px 5px rgba(0,0,0,0.65))',
+                                          filter:
+                                            'drop-shadow(0 4px 3px rgba(0,0,0,0.55))',
                                         }}
                                       />
                                       <span
-                                        className="mt-0.5 px-1 rounded bg-black/75 text-[6.5px] font-extrabold text-white uppercase tracking-tighter leading-none"
+                                        className={`mt-0.5 px-1 rounded bg-black/75 text-[6.5px] font-extrabold text-white uppercase tracking-tighter leading-none ${
+                                          isCurrentTurn
+                                            ? 'ring-1 ring-yellow-300'
+                                            : ''
+                                        }`}
                                         style={{ border: `1px solid ${p.color}` }}
                                       >
                                         P{p.id + 1}
@@ -786,7 +789,7 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
 
                               {/* Standee Pedestal Base */}
                               <div
-                                className="w-5 h-1.5 -mt-0.5 rounded-full border border-white/80"
+                                className="w-7 h-2 -mt-0.5 rounded-full border border-white/70"
                                 style={{ backgroundColor: p.color }}
                               />
                             </div>
