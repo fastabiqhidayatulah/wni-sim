@@ -48,6 +48,7 @@ import {
   Percent,
   Ticket,
   ShoppingBag,
+  Trash2,
 } from 'lucide-react';
 
 export interface PendingDebtObligation {
@@ -161,6 +162,11 @@ interface GameModalsProps {
   durationMode?: GameDurationMode;
   gameOverReason?: string;
   customAssets?: CustomImageAssets;
+  // Room online: tombol pembubaran room khusus Host di layar akhir
+  isOnlineRoom?: boolean;
+  isHost?: boolean;
+  onlineRoomCode?: string;
+  onDeleteOnlineRoom?: () => void;
 }
 
 export const GameModals: React.FC<GameModalsProps> = ({
@@ -236,6 +242,10 @@ export const GameModals: React.FC<GameModalsProps> = ({
   durationMode = 'FAST_15',
   gameOverReason = '',
   customAssets,
+  isOnlineRoom = false,
+  isHost = false,
+  onlineRoomCode = '',
+  onDeleteOnlineRoom,
 }) => {
   const otherPlayers = players.filter(
     (p) => p.id !== activePlayer.id && p.status !== 'BANGKRUT'
@@ -461,7 +471,11 @@ export const GameModals: React.FC<GameModalsProps> = ({
             </p>
           </div>
 
-          <div className="mt-6 grid grid-cols-2 gap-3">
+          <div
+            className={`mt-6 grid gap-3 ${
+              !isOnlineRoom || isHost ? 'grid-cols-2' : 'grid-cols-1'
+            }`}
+          >
             <button
               type="button"
               onClick={onResumeGame}
@@ -469,13 +483,15 @@ export const GameModals: React.FC<GameModalsProps> = ({
             >
               LANJUT MAIN
             </button>
-            <button
-              type="button"
-              onClick={onRestartGame}
-              className="py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-sm shadow-[0_4px_0_#b45309] cursor-pointer"
-            >
-              ULANG DARI AWAL
-            </button>
+            {(!isOnlineRoom || isHost) && (
+              <button
+                type="button"
+                onClick={onRestartGame}
+                className="py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-sm shadow-[0_4px_0_#b45309] cursor-pointer"
+              >
+                ULANG DARI AWAL
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -602,15 +618,42 @@ export const GameModals: React.FC<GameModalsProps> = ({
             })}
           </div>
 
-          <button
-            type="button"
-            data-start="true"
-            onClick={onRestartGame}
-            className="mt-5 w-full py-3.5 px-6 rounded-xl bg-amber-400 hover:bg-amber-300 text-stone-950 font-black text-base flex items-center justify-center gap-2 shadow-[0_5px_0_#b45309] cursor-pointer"
-          >
-            <RotateCcw className="w-5 h-5" />
-            MAIN LAGI DARI AWAL
-          </button>
+          {(!isOnlineRoom || isHost) ? (
+            <button
+              type="button"
+              data-start="true"
+              onClick={onRestartGame}
+              className="mt-5 w-full py-3.5 px-6 rounded-xl bg-amber-400 hover:bg-amber-300 text-stone-950 font-black text-base flex items-center justify-center gap-2 shadow-[0_5px_0_#b45309] cursor-pointer"
+            >
+              <RotateCcw className="w-5 h-5" />
+              MAIN LAGI DARI AWAL
+            </button>
+          ) : (
+            <div className="mt-5 w-full py-3 px-4 rounded-xl bg-amber-900/30 border border-amber-600/50 text-amber-200 text-xs font-bold">
+              ⏳ Menunggu Host memulai ulang room...
+            </div>
+          )}
+
+          {/* Khusus Host room online: bubarkan room & hapus permanen dari Firestore */}
+          {isOnlineRoom && isHost && onDeleteOnlineRoom && (
+            <button
+              type="button"
+              data-testid="delete-online-room-button"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Bubarkan Room #${onlineRoomCode} secara permanen? Seluruh Warga akan otomatis keluar.`
+                  )
+                ) {
+                  onDeleteOnlineRoom();
+                }
+              }}
+              className="mt-2.5 w-full py-2.5 px-5 rounded-xl bg-rose-950/90 hover:bg-rose-900 border-2 border-rose-500/70 text-rose-100 font-black text-xs flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Trash2 className="w-4 h-4" />
+              BUBARKAN ROOM & HAPUS PERMANEN
+            </button>
+          )}
         </div>
       </div>
     );

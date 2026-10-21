@@ -40,7 +40,44 @@ service cloud.firestore {
         (!('boardCenterLogo' in ca) || ca.boardCenterLogo == null || (ca.boardCenterLogo is string && ca.boardCenterLogo.size() <= 45000));
     }
 
-    // 3. Entity Validation Blueprint for Room (synchronized with firebase-blueprint.json)
+    function isValidPendingMoneyRequest(mr) {
+      return mr == null || (
+        mr is map &&
+        mr.keys().hasOnly(['fromPlayerId', 'toPlayerId', 'amount', 'reason']) &&
+        mr.keys().hasAll(['fromPlayerId', 'toPlayerId', 'amount', 'reason']) &&
+        mr.fromPlayerId is int && mr.fromPlayerId >= 0 && mr.fromPlayerId < 64 &&
+        mr.toPlayerId is int && mr.toPlayerId >= 0 && mr.toPlayerId < 64 &&
+        mr.amount is int && mr.amount >= 1 && mr.amount <= 1000000000 &&
+        mr.reason is string && mr.reason.size() <= 160
+      );
+    }
+
+    function isValidPendingLoanProposal(lp) {
+      return lp == null || (
+        lp is map &&
+        lp.keys().hasOnly(['borrowerId', 'lenderId', 'principal']) &&
+        lp.keys().hasAll(['borrowerId', 'lenderId', 'principal']) &&
+        lp.borrowerId is int && lp.borrowerId >= 0 && lp.borrowerId < 64 &&
+        lp.lenderId is int && lp.lenderId >= 0 && lp.lenderId < 64 &&
+        lp.principal is int && lp.principal >= 1 && lp.principal <= 1000000000
+      );
+    }
+
+    // 3. Room Membership Enforcement — hanya pemain yang terdaftar di `memberUids`
+    //    (daftar uid Firebase Auth hasil turunan pemain manusia) yang boleh menulis
+    //    state penuh room. Orang asing yang menebak kode room hanya boleh menulis
+    //    jalur "join": menambahkan dirinya sendiri tanpa mengecilkan daftar pemain.
+    function isRoomMember() {
+      return isSignedIn() && request.auth.uid in existing().memberUids;
+    }
+
+    function isLegitJoinWrite() {
+      return incoming().memberUids.hasAny([request.auth.uid]) &&
+        incoming().players.size() >= existing().players.size() &&
+        incoming().players.size() <= existing().players.size() + 1;
+    }
+
+    // 4. Entity Validation Blueprint for Room (synchronized with firebase-blueprint.json)
     function isValidRoom(data) {
       return data.keys().hasAll([
         'roomCode',
@@ -57,6 +94,7 @@ service cloud.firestore {
         'dice',
         'diceQuip',
         'players',
+        'memberUids',
         'properties',
         'loans',
         'activityLogs',
@@ -79,10 +117,15 @@ service cloud.firestore {
         'dice',
         'diceQuip',
         'players',
+        'memberUids',
         'properties',
         'loans',
         'activityLogs',
         'customAssets',
+        'durationMode',
+        'gameOverReason',
+        'pendingMoneyRequest',
+        'pendingLoanProposal',
         'createdAt',
         'updatedAt'
       ]) &&
@@ -102,10 +145,20 @@ service cloud.firestore {
       data.dice is list && data.dice.size() == 2 && data.dice[0] is int && data.dice[1] is int &&
       data.diceQuip is string && data.diceQuip.size() >= 1 && data.diceQuip.size() <= 240 &&
       data.players is list && data.players.size() >= 1 && data.players.size() <= 64 && data.players[0] is map &&
+      data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 64 &&
+      data.memberUids[0] is string && data.memberUids[0].size() <= 128 &&
       data.properties is map && data.properties.size() <= 45 &&
       data.loans is list && data.loans.size() <= 50 && (data.loans.size() == 0 || data.loans[0] is map) &&
       data.activityLogs is list && data.activityLogs.size() <= 40 && (data.activityLogs.size() == 0 || data.activityLogs[0] is map) &&
       isValidCustomAssets(data.customAssets) &&
+      (!('durationMode' in data) ||
+        data.durationMode == 'FAST_10' ||
+        data.durationMode == 'FAST_15' ||
+        data.durationMode == 'WEALTH_25M' ||
+        data.durationMode == 'CLASSIC') &&
+      (!('gameOverReason' in data) || (data.gameOverReason is string && data.gameOverReason.size() <= 240)) &&
+      (!('pendingMoneyRequest' in data) || isValidPendingMoneyRequest(data.pendingMoneyRequest)) &&
+      (!('pendingLoanProposal' in data) || isValidPendingLoanProposal(data.pendingLoanProposal)) &&
       data.createdAt is timestamp &&
       data.updatedAt is timestamp;
     }
@@ -128,29 +181,89 @@ service cloud.firestore {
       allow update: if isVerifiedUser() &&
         isValidRoomCode(roomCode) &&
         isValidRoom(incoming()) &&
-        existing().status != 'FINISHED' &&
+        // Room FINISHED terkunci, KECUALI Host menghidupkannya kembali
+        // lewat tombol "MAIN LAGI" (status kembali ke PLAYING).
+        (existing().status != 'FINISHED' ||
+          (request.auth.uid == existing().hostUid && incoming().status == 'PLAYING')) &&
         incoming().roomCode == existing().roomCode &&
         incoming().hostUid == existing().hostUid &&
         incoming().hostId == existing().hostId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
+        // memberUids monoton: hanya boleh bertambah (jalur join), tidak pernah menyusut —
+        // melindungi anggota dari dikeluarkan oleh penulis lain
+        incoming().memberUids.hasAll(existing().memberUids) &&
+        incoming().memberUids.size() <= existing().memberUids.size() + 1 &&
         (incoming().customAssets == existing().customAssets || existing().hostUid == request.auth.uid) && (
           // Action 1: Join or configure room while WAITING, sync Host customAssets, or start game (WAITING -> PLAYING)
           (existing().status == 'WAITING' &&
-            (incoming().status == 'WAITING' || incoming().status == 'PLAYING') &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'players',
-              'status',
-              'gameState',
-              'maxPlayers',
-              'activityLogs',
-              'customAssets',
-              'updatedAt'
-            ])
+            (incoming().status == 'WAITING' || incoming().status == 'PLAYING') && (
+              // Anggota room: kelola room tunggu (maxPlayers, tambah/kick bot, mulai game, dsb.)
+              (isRoomMember() &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'players',
+                  'status',
+                  'gameState',
+                  'maxPlayers',
+                  'activityLogs',
+                  'customAssets',
+                  'updatedAt'
+                ])
+              ) ||
+              // Pendatang: hanya boleh join (tambahkan diri sendiri + log)
+              (!isRoomMember() && isLegitJoinWrite() &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'players',
+                  'memberUids',
+                  'activityLogs',
+                  'updatedAt'
+                ])
+              )
+            )
           ) ||
           // Action 2: Real-time gameplay state & Host customAssets synchronization during PLAYING (or transition to FINISHED)
           (existing().status == 'PLAYING' &&
-            (incoming().status == 'PLAYING' || incoming().status == 'FINISHED') &&
+            (incoming().status == 'PLAYING' || incoming().status == 'FINISHED') && (
+              // Anggota room: sinkronisasi state penuh permainan
+              (isRoomMember() &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'players',
+                  'properties',
+                  'loans',
+                  'activityLogs',
+                  'customAssets',
+                  'round',
+                  'activePlayerIndex',
+                  'stateTreasury',
+                  'isExtremeMusibahActive',
+                  'dice',
+                  'diceQuip',
+                  'status',
+                  'gameState',
+                  'durationMode',
+                  'gameOverReason',
+                  'pendingMoneyRequest',
+                  'pendingLoanProposal',
+                  'updatedAt'
+                ])
+              ) ||
+              // Pendatang di tengah permainan: hanya boleh join (tambahkan diri sendiri + log)
+              (!isRoomMember() && isLegitJoinWrite() &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'players',
+                  'memberUids',
+                  'activityLogs',
+                  'updatedAt'
+                ])
+              )
+            )
+          ) ||
+          // Action 3: Host menghidupkan kembali room FINISHED lewat "MAIN LAGI"
+          // (FINISHED -> PLAYING) dengan state gameplay yang baru.
+          (existing().status == 'FINISHED' &&
+            isRoomMember() &&
+            request.auth.uid == existing().hostUid &&
+            incoming().status == 'PLAYING' &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'players',
               'properties',
@@ -165,6 +278,10 @@ service cloud.firestore {
               'diceQuip',
               'status',
               'gameState',
+              'durationMode',
+              'gameOverReason',
+              'pendingMoneyRequest',
+              'pendingLoanProposal',
               'updatedAt'
             ])
           )

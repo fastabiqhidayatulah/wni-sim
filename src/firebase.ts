@@ -14,6 +14,7 @@ import {
   getDocFromServer,
   setDoc,
   updateDoc,
+  deleteDoc,
   onSnapshot,
   serverTimestamp,
   Unsubscribe,
@@ -24,10 +25,16 @@ import {
   PropertyState,
   LoanRecord,
   AVATAR_CHARACTERS,
+  GameDurationMode,
   resolveHumanJoinRoomPlayers,
   SyncedCustomAssets,
   sanitizeCustomAssetsForFirestore,
+  deriveMemberUids,
 } from './game/rules';
+import type {
+  PendingLoanProposal,
+  PendingMoneyRequest,
+} from './components/GameModals';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -123,10 +130,60 @@ export interface FirestoreRoomData {
   dice: [number, number];
   diceQuip: string;
   players: Player[];
+  /** uid pemain manusia (tanpa bot) — sumber validasi keanggotaan di firestore.rules */
+  memberUids: string[];
   properties: Record<string, PropertyState>;
   loans: LoanRecord[];
   activityLogs: RoomActivityLog[];
   customAssets?: SyncedCustomAssets;
+  /** Mode durasi dipilih Host — ikut disinkronkan agar HUD & layar akhir sama di semua klien. */
+  durationMode?: GameDurationMode;
+  /** Alasan berakhirnya permainan (mis. target kekayaan / batas ronde tercapai). */
+  gameOverReason?: string;
+  /** Permintaan uang antar-pemain yang sedang menunggu jawaban pemain tujuan. */
+  pendingMoneyRequest?: PendingMoneyRequest | null;
+  /** Pengajuan pinjaman antar-pemain yang sedang menunggu persetujuan calon pemberi pinjaman. */
+  pendingLoanProposal?: PendingLoanProposal | null;
+}
+
+const GAME_DURATION_MODES: GameDurationMode[] = [
+  'FAST_10',
+  'FAST_15',
+  'WEALTH_25M',
+  'CLASSIC',
+];
+
+const clampPlayerId = (raw: unknown): number =>
+  Math.max(0, Math.min(63, Math.round(Number(raw) || 0)));
+
+/**
+ * Bentuk request yang dikirim ke Firestore harus dipangkas & dikunci tipenya
+ * agar lolos validasi `isValidRoom` di firestore.rules.
+ */
+export function sanitizePendingMoneyRequestForFirestore(
+  req: PendingMoneyRequest | null | undefined
+): PendingMoneyRequest | null {
+  if (!req) return null;
+  return {
+    fromPlayerId: clampPlayerId(req.fromPlayerId),
+    toPlayerId: clampPlayerId(req.toPlayerId),
+    amount: Math.max(1, Math.min(1_000_000_000, Math.round(Number(req.amount) || 0))),
+    reason: (req.reason || '').slice(0, 160),
+  };
+}
+
+export function sanitizePendingLoanProposalForFirestore(
+  proposal: PendingLoanProposal | null | undefined
+): PendingLoanProposal | null {
+  if (!proposal) return null;
+  return {
+    borrowerId: clampPlayerId(proposal.borrowerId),
+    lenderId: clampPlayerId(proposal.lenderId),
+    principal: Math.max(
+      1,
+      Math.min(1_000_000_000, Math.round(Number(proposal.principal) || 0))
+    ),
+  };
 }
 
 export const ROOM_CODE_REGEX = /^[a-zA-Z0-9_\-]+$/;
@@ -269,6 +326,7 @@ export async function createFirestoreRoom(params: {
       dice: [4, 2],
       diceQuip: 'Menunggu warga berkumpul di Room Konoha!',
       players: sanitizePlayersForFirestore(params.players),
+      memberUids: deriveMemberUids(params.players),
       properties: serializePropertiesForFirestore(params.properties),
       loans: [],
       activityLogs: params.activityLogs.slice(0, 40),
@@ -387,6 +445,7 @@ export async function updateWaitingRoomInFirestore(params: {
   try {
     const payload: Record<string, unknown> = {
       players: sanitizePlayersForFirestore(params.players),
+      memberUids: deriveMemberUids(params.players),
       status: params.status,
       gameState: params.gameState || params.status,
       maxPlayers: Math.max(2, Math.min(64, Math.round(params.maxPlayers))),
@@ -435,6 +494,10 @@ export async function syncGameplayToFirestore(params: {
   dice: [number, number];
   diceQuip: string;
   status: 'PLAYING' | 'FINISHED';
+  durationMode?: GameDurationMode;
+  gameOverReason?: string;
+  pendingMoneyRequest?: PendingMoneyRequest | null;
+  pendingLoanProposal?: PendingLoanProposal | null;
   customAssets?: {
     pawns?: Record<string, string> | null;
     buildings?: Record<string | number, string> | null;
@@ -463,8 +526,23 @@ export async function syncGameplayToFirestore(params: {
       diceQuip: (params.diceQuip || 'Giliran berjalan...').slice(0, 240),
       status: params.status,
       gameState: params.status === 'FINISHED' ? 'FINISHED' : 'PLAYING',
+      gameOverReason: (params.gameOverReason || '').slice(0, 240),
+      pendingMoneyRequest: sanitizePendingMoneyRequestForFirestore(
+        params.pendingMoneyRequest
+      ),
+      pendingLoanProposal: sanitizePendingLoanProposalForFirestore(
+        params.pendingLoanProposal
+      ),
       updatedAt: serverTimestamp(),
     };
+    // Mode durasi adalah setelan Host: klien non-host tidak menulisnya agar
+    // snapshot lama tidak menimpa pilihan Host saat race di awal permainan.
+    if (
+      params.durationMode &&
+      GAME_DURATION_MODES.includes(params.durationMode)
+    ) {
+      payload.durationMode = params.durationMode;
+    }
     if (params.customAssets !== undefined) {
       payload.customAssets = sanitizeCustomAssetsForFirestore(params.customAssets);
     }
@@ -474,10 +552,25 @@ export async function syncGameplayToFirestore(params: {
   }
 }
 
+/**
+ * Hapus dokumen room dari Firestore (hanya Host yang diizinkan rules).
+ * Setelah ini, klien lain menerima snapshot "dokumen hilang" lewat `onDeleted`.
+ */
+export async function deleteFirestoreRoom(roomCode: string): Promise<void> {
+  const code = sanitizeRoomCode(roomCode);
+  const path = `rooms/${code}`;
+  try {
+    await deleteDoc(doc(db, 'rooms', code));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
 export function subscribeToFirestoreRoom(
   roomCode: string,
   onUpdate: (data: FirestoreRoomData) => void,
-  onError?: (err: unknown) => void
+  onError?: (err: unknown) => void,
+  onDeleted?: () => void
 ): Unsubscribe {
   const code = sanitizeRoomCode(roomCode);
   const path = `rooms/${code}`;
@@ -486,6 +579,9 @@ export function subscribeToFirestoreRoom(
     (snapshot) => {
       if (snapshot.exists()) {
         onUpdate(snapshot.data() as FirestoreRoomData);
+      } else if (onDeleted) {
+        // Dokumen room dihapus dari server (mis. Host membubarkan room)
+        onDeleted();
       }
     },
     (error) => {

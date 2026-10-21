@@ -453,6 +453,7 @@ export const LobbyAndWaitingRoom: React.FC<LobbyAndWaitingRoomProps> = ({
                 <div
                   key={p.id}
                   data-testid={`waiting-player-card-${idx}`}
+                  data-hover-popup-anchor="true"
                   onMouseEnter={(e) => onHoverPlayer?.(p, e.clientX, e.clientY)}
                   onMouseMove={(e) => onHoverPlayer?.(p, e.clientX, e.clientY)}
                   onMouseLeave={() => onHoverPlayer?.(null)}

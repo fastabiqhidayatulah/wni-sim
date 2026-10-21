@@ -77,6 +77,10 @@
           "type": "array",
           "description": "Bounded list of up to 64 players in the room."
         },
+        "memberUids": {
+          "type": "array",
+          "description": "Bounded list of Firebase Auth UIDs (<=128 chars) of human members, without bots. Source of truth for write-permission membership checks in firestore.rules; monotonically grows via the join path only."
+        },
         "properties": {
           "type": "object",
           "description": "Map of board tile IDs to property ownership and building state."
@@ -92,6 +96,24 @@
         "customAssets": {
           "type": "object",
           "description": "Synchronized custom images (pawns, 3D buildings, board center logo) configured by the room host."
+        },
+        "durationMode": {
+          "type": "string",
+          "enum": ["FAST_10", "FAST_15", "WEALTH_25M", "CLASSIC"],
+          "description": "Host-selected game duration mode, synchronized so every client shows the same HUD and end screen."
+        },
+        "gameOverReason": {
+          "type": "string",
+          "description": "Reason the game ended (round limit, wealth target, or last player standing).",
+          "maxLength": 240
+        },
+        "pendingMoneyRequest": {
+          "type": ["object", "null"],
+          "description": "Active player-to-player money request awaiting the target player's accept/reject decision."
+        },
+        "pendingLoanProposal": {
+          "type": ["object", "null"],
+          "description": "Active player-to-player loan proposal awaiting the lender's approval and interest rate."
         },
         "createdAt": {
           "type": "string",
@@ -119,6 +141,7 @@
         "dice",
         "diceQuip",
         "players",
+        "memberUids",
         "properties",
         "loans",
         "activityLogs",

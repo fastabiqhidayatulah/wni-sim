@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "default": "wni-simulator-71c6f",
+    "wniproject": "wni-simulator-71c6f"
+  },
+  "targets": {},
+  "etags": {}
+}

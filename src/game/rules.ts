@@ -1042,6 +1042,26 @@ export function generateRoomCode(): string {
   return `WNI-${randomDigits}`;
 }
 
+/**
+ * Derive daftar uid pemain MANUSIA di room (tanpa bot) untuk field top-level
+ * `memberUids` di dokumen Firestore. Field ini yang dibaca `firestore.rules`
+ * untuk validasi keanggotaan: hanya anggota yang boleh menulis state penuh,
+ * selain pendatang lewat jalur join. Daftar ini monoton (tidak pernah menyusut)
+ * karena alur game hanya menambah manusia atau mengganti/membuang bot.
+ */
+export function deriveMemberUids(players: Player[]): string[] {
+  const seen = new Set<string>();
+  const uids: string[] = [];
+  players.forEach((p) => {
+    if (p.isBot) return;
+    const uid = String(p.uid || '').slice(0, 128);
+    if (!uid || seen.has(uid)) return;
+    seen.add(uid);
+    uids.push(uid);
+  });
+  return uids.slice(0, 64);
+}
+
 export function createPlayerFromAvatar(params: {
   id: number;
   name: string;

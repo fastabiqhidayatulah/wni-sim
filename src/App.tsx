@@ -79,6 +79,8 @@ import {
   signInWithGooglePopup,
   signOutFirebaseUser,
   createFirestoreRoom,
+  fetchFirestoreRoom,
+  deleteFirestoreRoom,
   joinRoom,
   updateWaitingRoomInFirestore,
   syncHostCustomAssetsToFirestore,
@@ -152,6 +154,10 @@ interface FloatingMoneyItem {
   text: string;
   isPositive: boolean;
 }
+
+const isGameDurationMode = (value: unknown): value is GameDurationMode =>
+  typeof value === 'string' &&
+  DURATION_MODE_OPTIONS.some((mode) => mode.id === value);
 
 const DICE_QUIPS = [
   'Bismillah keluar angka hoki, jangan masuk Lapas!',
@@ -230,6 +236,44 @@ export default function App() {
   >({});
   const floatingTimersRef = useRef<Set<number>>(new Set());
   const prevMoneyMapRef = useRef<Record<number, number> | null>(null);
+  // ID log aksi yang sudah pernah ditampilkan di klien ini (termasuk aksi lokal).
+  // Dipakai supaya aksi pemain lain juga memunculkan toast kuning, tanpa
+  // menduplikasi toast untuk aksi kita sendiri.
+  const seenActivityLogIdsRef = useRef<Set<string>>(new Set());
+
+  /**
+   * Snapshot terakhir yang berhasil diterapkan dari Firestore.
+   * Dipakai efek push untuk mendeteksi apakah state lokal benar-benar berubah
+   * sejak snapshot terakhir — push hanya dikirim saat ada divergensi lokal
+   * (hemat kuota Firestore: klien yang murni penerima tidak ikut menulis).
+   */
+  const lastRemoteSyncedRef = useRef<{
+    players: Player[] | null;
+    properties: Record<number, PropertyState> | null;
+    loans: LoanRecord[] | null;
+    activityLogs: ActivityLogItem[] | null;
+    round: number | null;
+    activePlayerIndex: number | null;
+    stateTreasury: number | null;
+    isExtremeMusibahActive: boolean | null;
+    dice: [number, number] | null;
+    diceQuip: string | null;
+    durationMode: GameDurationMode | null;
+    gameOverReason: string | null;
+  }>({
+    players: null,
+    properties: null,
+    loans: null,
+    activityLogs: null,
+    round: null,
+    activePlayerIndex: null,
+    stateTreasury: null,
+    isExtremeMusibahActive: null,
+    dice: null,
+    diceQuip: null,
+    durationMode: null,
+    gameOverReason: null,
+  });
 
   const handleUpdateCustomAssets = useCallback(
     (next: CustomImageAssets) => {
@@ -471,11 +515,229 @@ export default function App() {
   ]);
 
   const activePlayer = players[activePlayerIndex] || players[0];
+
+  // Ref cermin gameState — dibaca handler snapshot Firestore yang closure-nya
+  // bisa usang (efek subscribe tidak re-run saat gameState berubah).
+  const gameStateRef = useRef(gameState);
+  gameStateRef.current = gameState;
+
+  // Kepemilikan giliran (mode online): HANYA klien pemain aktif yang boleh
+  // menjalankan aksi giliran; untuk pemain bot, hanya Host yang menjalankan.
+  // Mencegah SEMUA klien melempar dadu otomatis dengan RNG masing-masing.
+  const isMyTurnToAct =
+    !isOnlineRoom ||
+    (activePlayer?.isBot
+      ? isHost
+      : Boolean(firebaseUser && activePlayer?.uid === firebaseUser.uid));
+  // Tombol lempar/akhiri giliran dikunci saat bukan giliran kita secara online.
+  const turnControlsLocked = isOnlineRoom && !isMyTurnToAct;
   const applyingRemoteSnapshotRef = useRef<boolean>(false);
+
+  // Identitas kita di room online (fallback ke myPlayerId hasil snapshot).
+  const myOnlinePlayer = isOnlineRoom
+    ? players.find((p) => p.uid === firebaseUser?.uid) ?? null
+    : null;
+  const myOnlinePlayerId = myOnlinePlayer ? myOnlinePlayer.id : myPlayerId;
+
+  // --- VISIBILITAS AJUAN ANTAR-PEMAIN ---
+  // Minta Duit & pinjaman antar-WNI HARUS dilihat oleh pemain yang menjawab,
+  // bukan oleh pemohon. Bot tidak punya klien: permintaan uang ke bot dijawab
+  // otomatis di klien pemohon, sedangkan pinjaman dari bot tetap disetujui
+  // peminjam (tidak ada manusia yang dirugikan).
+  const moneyRequestTarget = pendingMoneyRequest
+    ? players.find((p) => p.id === pendingMoneyRequest.toPlayerId) ?? null
+    : null;
+  const loanProposalLender = pendingLoanProposal
+    ? players.find((p) => p.id === pendingLoanProposal.lenderId) ?? null
+    : null;
+  // Klien yang berhak menjalankan respons (termasuk pemohon bila targetnya bot).
+  const canRespondToMoneyRequest =
+    Boolean(pendingMoneyRequest) &&
+    (!isOnlineRoom ||
+      (moneyRequestTarget?.isBot
+        ? pendingMoneyRequest?.fromPlayerId === myOnlinePlayerId
+        : pendingMoneyRequest?.toPlayerId === myOnlinePlayerId));
+  const canRespondToLoanProposal =
+    Boolean(pendingLoanProposal) &&
+    (!isOnlineRoom ||
+      (loanProposalLender?.isBot
+        ? pendingLoanProposal?.borrowerId === myOnlinePlayerId
+        : pendingLoanProposal?.lenderId === myOnlinePlayerId));
+  // Modal hanya untuk pemain tujuan (manusia). Request ke bot diselesaikan
+  // otomatis, jadi pemohon tidak perlu melihat modal persetujuan.
+  const visibleMoneyRequest =
+    pendingMoneyRequest &&
+    (!isOnlineRoom ||
+      (!moneyRequestTarget?.isBot &&
+        pendingMoneyRequest.toPlayerId === myOnlinePlayerId))
+      ? pendingMoneyRequest
+      : null;
+  const visibleLoanProposal = canRespondToLoanProposal
+    ? pendingLoanProposal
+    : null;
+
+  // Waktu klien ini terakhir mengubah request secara lokal. Snapshot yang tiba
+  // <1.5 dtk setelahnya diabaikan agar push kita sendiri tidak saling menimpa.
+  const pendingRequestWriteAtRef = useRef<number>(0);
+
+  // Ref cermin players — dipakai animasi gerak pion di klien penerima snapshot.
+  const playersRef = useRef<Player[]>(players);
+  playersRef.current = players;
+
+  // --- ANIMASI GERAK PION UNTUK KLIEN NON-AKTIF ---
+  // Snapshot Firestore hanya membawa posisi akhir, sehingga klien lain dulu
+  // melihat pion "teleport" ke petak tujuan. Di sini posisi akhir itu diurai
+  // kembali menjadi langkah 1-petak (115-140ms) supaya animasi perjalanan ikut
+  // terlihat di semua pemain, bukan hanya di klien yang melempar dadu.
+  const remoteWalkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const remoteWalkTargetsRef = useRef<Map<number, number>>(new Map());
+  const remoteAnimatingRef = useRef<boolean>(false);
+
+  const stopRemoteWalkAnimation = useCallback(() => {
+    if (remoteWalkTimerRef.current !== null) {
+      clearInterval(remoteWalkTimerRef.current);
+      remoteWalkTimerRef.current = null;
+    }
+    remoteWalkTargetsRef.current.clear();
+    remoteAnimatingRef.current = false;
+  }, []);
+
+  const applyRemotePlayers = useCallback(
+    (remotePlayers: Player[]) => {
+      stopRemoteWalkAnimation();
+
+      const prevLocalPlayers = playersRef.current;
+      const walkTargets = new Map<number, number>();
+      const stagedPlayers = remotePlayers.map((remotePlayer) => {
+        const prev = prevLocalPlayers.find((p) => p.id === remotePlayer.id);
+        if (!prev || prev.position === remotePlayer.position) {
+          return remotePlayer;
+        }
+        const oldPos = prev.position;
+        const newPos = remotePlayer.position;
+        const isPerimeter = (v: number) =>
+          Number.isInteger(v) && v >= 0 && v < PERIMETER_TILE_COUNT;
+        const forwardDelta =
+          (newPos - oldPos + PERIMETER_TILE_COUNT) % PERIMETER_TILE_COUNT;
+        // Hanya perpindahan wajar hasil lemparan dadu (maju 1..20 petak, status
+        // tidak berubah) yang dianimasikan. Teleport (Lapas, Bekasi, Tol yang
+        // jauh, restart) tetap snap agar tidak terlihat berjalan mundur/aneh.
+        if (
+          isPerimeter(oldPos) &&
+          isPerimeter(newPos) &&
+          forwardDelta >= 1 &&
+          forwardDelta <= 20 &&
+          remotePlayer.status === prev.status
+        ) {
+          walkTargets.set(remotePlayer.id, newPos);
+          return { ...remotePlayer, position: oldPos };
+        }
+        return remotePlayer;
+      });
+
+      setPlayers(stagedPlayers);
+      lastRemoteSyncedRef.current.players = stagedPlayers;
+
+      if (walkTargets.size === 0) return;
+
+      remoteWalkTargetsRef.current = walkTargets;
+      remoteAnimatingRef.current = true;
+
+      remoteWalkTimerRef.current = setInterval(() => {
+        const targets = remoteWalkTargetsRef.current;
+        let allReached = true;
+        const steppedPlayers = playersRef.current.map((p) => {
+          const target = targets.get(p.id);
+          if (target === undefined || p.position === target) return p;
+          allReached = false;
+          const nextPos = (p.position + 1) % PERIMETER_TILE_COUNT;
+          return {
+            ...p,
+            position: nextPos,
+            lastPerimeterPosition: nextPos,
+          };
+        });
+
+        if (allReached) {
+          stopRemoteWalkAnimation();
+          // Kunci posisi akhir persis seperti snapshot agar tidak dianggap divergen.
+          setPlayers(remotePlayers);
+          lastRemoteSyncedRef.current.players = remotePlayers;
+          return;
+        }
+        setPlayers(steppedPlayers);
+      }, 140);
+    },
+    [stopRemoteWalkAnimation]
+  );
+
+  // Hentikan animasi berjalan saat komponen unmount / keluar room.
+  useEffect(() => () => stopRemoteWalkAnimation(), [stopRemoteWalkAnimation]);
 
   useEffect(() => {
     document.body.dataset.state = screen === 'GAME' ? gameState : screen.toLowerCase();
   }, [screen, gameState]);
+
+  // Popup hover bisa "nyangkut" ketika elemen yang di-hover hilang (pion pindah
+  // petak saat animasi), kursor keluar jendela, atau modal terbuka. Sapu bersih
+  // lewat listener global agar popup tidak pernah tertinggal di layar.
+  useEffect(() => {
+    const clearHover = () => {
+      setHoveredPlayer(null);
+      setHoveredTile(null);
+    };
+    const handlePointerMove = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      // Semua sumber hover (petak, pion, kartu pemain) ditandai
+      // data-hover-popup-anchor="true" — popup hanya boleh hidup di atasnya.
+      if (target && target.closest('[data-hover-popup-anchor="true"]')) {
+        return;
+      }
+      clearHover();
+    };
+    const handleWindowMouseOut = (e: MouseEvent) => {
+      // relatedTarget null = kursor meninggalkan jendela/dokumen.
+      if (!e.relatedTarget) clearHover();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') clearHover();
+    };
+    window.addEventListener('pointermove', handlePointerMove, { passive: true });
+    window.addEventListener('mouseout', handleWindowMouseOut);
+    window.addEventListener('blur', clearHover);
+    window.addEventListener('scroll', clearHover, true);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('mouseout', handleWindowMouseOut);
+      window.removeEventListener('blur', clearHover);
+      window.removeEventListener('scroll', clearHover, true);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, []);
+
+  // Popup hover tidak relevan lagi begitu modal (mis. detail petak) dibuka.
+  useEffect(() => {
+    if (selectedTileModal) {
+      setHoveredPlayer(null);
+      setHoveredTile(null);
+    }
+  }, [selectedTileModal]);
+
+  // Pion yang bergerak/teleport (atau bangkrut) saat sedang di-hover: popup
+  // profilnya sudah tidak relevan dan tidak akan menerima onMouseLeave karena
+  // elemennya berpindah petak — tutup proaktif.
+  useEffect(() => {
+    if (!hoveredPlayer) return;
+    const fresh = players.find((p) => p.id === hoveredPlayer.id);
+    if (
+      !fresh ||
+      fresh.position !== hoveredPlayer.position ||
+      fresh.status === 'BANGKRUT'
+    ) {
+      setHoveredPlayer(null);
+    }
+  }, [players, hoveredPlayer]);
 
   // Listen to Firebase Auth state
   useEffect(() => {
@@ -498,7 +760,7 @@ export default function App() {
         (roomData) => {
           applyingRemoteSnapshotRef.current = true;
           if (roomData.players && roomData.players.length > 0) {
-            setPlayers(roomData.players);
+            applyRemotePlayers(roomData.players);
 
             // Tentukan status Host berdasarkan roomData.hostId === myPlayerId (atau hostUid)
             const me = roomData.players.find(
@@ -515,7 +777,11 @@ export default function App() {
             setIsHost(isCurrentHost);
           }
           if (roomData.properties) {
-            setProperties(deserializePropertiesFromFirestore(roomData.properties));
+            const remoteProps = deserializePropertiesFromFirestore(
+              roomData.properties
+            );
+            setProperties(remoteProps);
+            lastRemoteSyncedRef.current.properties = remoteProps;
           }
           if (roomData.customAssets) {
             setCustomAssets((prev) =>
@@ -527,8 +793,11 @@ export default function App() {
           }
           if (typeof roomData.round === 'number') {
             setRound(roomData.round);
+            lastRemoteSyncedRef.current.round = roomData.round;
           }
           if (typeof roomData.activePlayerIndex === 'number') {
+            lastRemoteSyncedRef.current.activePlayerIndex =
+              roomData.activePlayerIndex;
             setActivePlayerIndex((prevIdx) => {
               if (prevIdx !== roomData.activePlayerIndex) {
                 rollLockRef.current = false;
@@ -554,21 +823,48 @@ export default function App() {
           }
           if (typeof roomData.stateTreasury === 'number') {
             setStateTreasury(roomData.stateTreasury);
+            lastRemoteSyncedRef.current.stateTreasury = roomData.stateTreasury;
           }
           if (typeof roomData.isExtremeMusibahActive === 'boolean') {
             setIsExtremeMusibahActive(roomData.isExtremeMusibahActive);
+            lastRemoteSyncedRef.current.isExtremeMusibahActive =
+              roomData.isExtremeMusibahActive;
           }
           if (Array.isArray(roomData.dice) && roomData.dice.length === 2) {
-            setDice([roomData.dice[0], roomData.dice[1]]);
+            const remoteDice: [number, number] = [
+              roomData.dice[0],
+              roomData.dice[1],
+            ];
+            setDice(remoteDice);
+            lastRemoteSyncedRef.current.dice = remoteDice;
           }
           if (roomData.diceQuip) {
             setDiceQuip(roomData.diceQuip);
+            lastRemoteSyncedRef.current.diceQuip = roomData.diceQuip;
           }
           if (Array.isArray(roomData.loans)) {
             setLoans(roomData.loans);
+            lastRemoteSyncedRef.current.loans = roomData.loans;
           }
           if (Array.isArray(roomData.activityLogs) && roomData.activityLogs.length > 0) {
             setActivityLogs(roomData.activityLogs);
+            lastRemoteSyncedRef.current.activityLogs = roomData.activityLogs;
+          }
+          if (isGameDurationMode(roomData.durationMode)) {
+            setDurationMode(roomData.durationMode);
+            lastRemoteSyncedRef.current.durationMode = roomData.durationMode;
+          }
+          if (typeof roomData.gameOverReason === 'string') {
+            setGameOverReason(roomData.gameOverReason);
+            lastRemoteSyncedRef.current.gameOverReason = roomData.gameOverReason;
+          }
+
+          // Ajuan antar-pemain ikut disinkronkan. Abaikan snapshot yang datang
+          // terlalu cepat setelah klien ini menulis request (hindari balapan
+          // dengan push kita sendiri yang belum tentu sudah sampai server).
+          if (Date.now() - pendingRequestWriteAtRef.current > 1500) {
+            setPendingMoneyRequest(roomData.pendingMoneyRequest ?? null);
+            setPendingLoanProposal(roomData.pendingLoanProposal ?? null);
           }
 
           // FIX 2: TRANSISI KELUAR RUANG TUNGGU BERSAMA-SAMA (HOST & GUEST IKUT PLAY)
@@ -578,7 +874,21 @@ export default function App() {
             (roomData.gameState === 'PLAYING' || roomData.status === 'PLAYING') &&
             screen === 'WAITING_ROOM'
           ) {
-            setScreen('GAME');
+            // Semua klien (Host & Guest) melihat Opening Movie lebih dulu bila
+            // diaktifkan. Masing-masing bisa menekan tombol LEWATI kapan saja.
+            setScreen(
+              resolveGameStartTargetScreen({
+                introMovieEnabled,
+              })
+            );
+            setGameState('playing');
+          } else if (
+            (roomData.gameState === 'PLAYING' || roomData.status === 'PLAYING') &&
+            screen === 'GAME' &&
+            gameStateRef.current === 'gameover'
+          ) {
+            // Host menekan "MAIN LAGI": room dihidupkan kembali dari FINISHED,
+            // semua klien keluar dari layar akhir dan melanjutkan permainan baru.
             setGameState('playing');
           } else if (
             (roomData.gameState === 'FINISHED' || roomData.status === 'FINISHED') &&
@@ -592,15 +902,37 @@ export default function App() {
         },
         (err) => {
           console.warn('Firestore room subscription warning:', err);
+        },
+        () => {
+          // Room dihapus dari server (misalnya Host membubarkan room lewat layar akhir)
+          if (!isOnlineRoom) return;
+          showQuickBanner(
+            `🗑️ Room #${roomCode} telah dibubarkan oleh Host. Warga kembali ke Lobby...`
+          );
+          setIsOnlineRoom(false);
+          setRoomCode('');
+          setIsHost(false);
+          setGameState('title');
+          setScreen('LOBBY');
         }
       );
     } catch (err) {
       console.warn('Could not attach Firestore listener:', err);
     }
     return () => {
+      stopRemoteWalkAnimation();
       if (unsub) unsub();
     };
-  }, [isOnlineRoom, roomCode, firebaseUser, screen, myPlayerId]);
+  }, [
+    isOnlineRoom,
+    roomCode,
+    firebaseUser,
+    screen,
+    myPlayerId,
+    applyRemotePlayers,
+    stopRemoteWalkAnimation,
+    introMovieEnabled,
+  ]);
 
   // Push local gameplay state updates to Firestore when in an online room during GAME
   useEffect(() => {
@@ -609,9 +941,31 @@ export default function App() {
       !firebaseUser ||
       screen !== 'GAME' ||
       applyingRemoteSnapshotRef.current ||
+      remoteAnimatingRef.current ||
       isRolling ||
       isMoving
     ) {
+      return;
+    }
+    // GATE HEMAT KUOTA: kirim hanya jika state lokal benar-benar berubah sejak
+    // snapshot Firestore terakhir (mis. pemain menerima permintaan uang, menyetujui
+    // pinjaman, atau klien ini yang sedang menjalankan giliran). Klien yang murni
+    // menerima snapshot tidak ikut menulis — mengurangi pemborosan kuota & bentrok.
+    const remoteSnapshot = lastRemoteSyncedRef.current;
+    const hasLocalDivergence =
+      players !== remoteSnapshot.players ||
+      properties !== remoteSnapshot.properties ||
+      loans !== remoteSnapshot.loans ||
+      activityLogs !== remoteSnapshot.activityLogs ||
+      round !== remoteSnapshot.round ||
+      activePlayerIndex !== remoteSnapshot.activePlayerIndex ||
+      stateTreasury !== remoteSnapshot.stateTreasury ||
+      isExtremeMusibahActive !== remoteSnapshot.isExtremeMusibahActive ||
+      dice !== remoteSnapshot.dice ||
+      diceQuip !== remoteSnapshot.diceQuip ||
+      durationMode !== remoteSnapshot.durationMode ||
+      gameOverReason !== remoteSnapshot.gameOverReason;
+    if (!hasLocalDivergence) {
       return;
     }
     const timer = setTimeout(() => {
@@ -628,6 +982,10 @@ export default function App() {
         dice,
         diceQuip,
         status: gameState === 'gameover' ? 'FINISHED' : 'PLAYING',
+        durationMode: isHost ? durationMode : undefined,
+        gameOverReason,
+        pendingMoneyRequest,
+        pendingLoanProposal,
         customAssets: isHost ? customAssets : undefined,
       }).catch((err) => {
         console.warn('Sync gameplay to Firestore failed:', err);
@@ -649,6 +1007,10 @@ export default function App() {
     isExtremeMusibahActive,
     dice,
     diceQuip,
+    durationMode,
+    gameOverReason,
+    pendingMoneyRequest,
+    pendingLoanProposal,
     gameState,
     isRolling,
     isMoving,
@@ -663,15 +1025,51 @@ export default function App() {
     }, 4200);
   }, []);
 
+  // TOAST AKSI PEMAIN LAIN (ONLINE):
+  // Activity log ikut disinkronkan lewat Firestore, jadi setiap entri log baru
+  // dari pemain lain kita tampilkan sebagai pop-up kuning yang sama. Aksi kita
+  // sendiri sudah ditandai "seen" di addLog agar toast tidak muncul dua kali.
+  const lastActivityLogsForToastRef = useRef<ActivityLogItem[] | null>(null);
+  useEffect(() => {
+    const prevLogs = lastActivityLogsForToastRef.current;
+    lastActivityLogsForToastRef.current = activityLogs;
+    if (
+      !prevLogs ||
+      screen !== 'GAME' ||
+      gameState !== 'playing' ||
+      activityLogs.length === 0
+    ) {
+      return;
+    }
+    const prevIds = new Set(prevLogs.map((log) => log.id));
+    const freshRemoteLogs = activityLogs.filter(
+      (log) =>
+        !prevIds.has(log.id) && !seenActivityLogIdsRef.current.has(log.id)
+    );
+    if (freshRemoteLogs.length === 0) return;
+    freshRemoteLogs.forEach((log) => {
+      seenActivityLogIdsRef.current.add(log.id);
+    });
+    showQuickBanner(freshRemoteLogs[0].text);
+  }, [activityLogs, screen, gameState, showQuickBanner]);
+
   const addLog = useCallback(
     (text: string, type: ActivityLogItem['type'] = 'info') => {
       const now = new Date();
       const timestamp = `${String(now.getMinutes()).padStart(2, '0')}:${String(
         now.getSeconds()
       ).padStart(2, '0')}`;
+      const id = `${Date.now()}-${Math.random()}`;
+      const seenIds = seenActivityLogIdsRef.current;
+      seenIds.add(id);
+      if (seenIds.size > 300) {
+        // Batasi memori: buang ID paling lama.
+        const oldest = seenIds.values().next().value;
+        if (oldest) seenIds.delete(oldest);
+      }
       setActivityLogs((prev) => [
         {
-          id: `${Date.now()}-${Math.random()}`,
+          id,
           text,
           type,
           timestamp,
@@ -890,8 +1288,52 @@ export default function App() {
   );
 
   // Advance to the next player's turn (ONLY place where dice roll lock is reset!)
+  // Anti giliran dobel: semua penjadwalan "maju giliran" lewat satu jalur ini,
+  // dan eksekusi mana pun (klik manual maupun timer) membatalkan jadwal lama.
+  const pendingTurnAdvanceTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(
+    new Set()
+  );
+  // Ref cermin flag modal yang sedang terbuka — dipakai penjadwal maju giliran
+  // otomatis agar tidak menabrak rantai modal yang baru terbuka (kartu Takdir,
+  // Pengadilan, Krisis Keuangan, dsb.).
+  const modalFlowBusyRef = useRef(false);
+  useEffect(() => {
+    modalFlowBusyRef.current = Boolean(
+      pendingDebtObligation ||
+        activeFateCard ||
+        showCourtModal ||
+        showTollModal ||
+        showJailModal ||
+        showPremiumCellModal ||
+        showBuyUpgradeModal ||
+        visibleLoanProposal ||
+        visibleMoneyRequest ||
+        showGiveMoneyModal ||
+        showAskMoneyModal ||
+        showDukunModal
+    );
+  }, [
+    pendingDebtObligation,
+    activeFateCard,
+    showCourtModal,
+    showTollModal,
+    showJailModal,
+    showPremiumCellModal,
+    showBuyUpgradeModal,
+    visibleLoanProposal,
+    visibleMoneyRequest,
+    showGiveMoneyModal,
+    showAskMoneyModal,
+    showDukunModal,
+  ]);
+
   const handleNextTurn = useCallback(() => {
     if (isRolling || isMoving || isLandingPause) return;
+
+    // Batalkan penjadwalan maju giliran yang masih tertunda — klik manual
+    // menimpa timer otomatis dan sebaliknya, agar giliran tidak terlewat dua kali.
+    pendingTurnAdvanceTimersRef.current.forEach((timer) => clearTimeout(timer));
+    pendingTurnAdvanceTimersRef.current.clear();
 
     if (landingPauseTimerRef.current) {
       clearTimeout(landingPauseTimerRef.current);
@@ -921,7 +1363,41 @@ export default function App() {
         'info'
       );
       setPendingMoneyRequest(null);
+      pendingRequestWriteAtRef.current = Date.now();
     }
+
+    if (pendingLoanProposal) {
+      const proposalBorrower = players.find(
+        (p) => p.id === pendingLoanProposal.borrowerId
+      );
+      const proposalLender = players.find(
+        (p) => p.id === pendingLoanProposal.lenderId
+      );
+      addLog(
+        `⌛ Pengajuan pinjaman ${proposalBorrower?.name ?? 'pemain'} ke ${
+          proposalLender?.name ?? 'pemain'
+        } hangus karena giliran berakhir.`,
+        'info'
+      );
+      setPendingLoanProposal(null);
+      pendingRequestWriteAtRef.current = Date.now();
+    }
+
+    // Tutup sisa modal/antrean giliran sebelumnya agar tidak terbawa ke pemain
+    // berikutnya (kartu Takdir, Pengadilan, Gerbang Tol, dsb. yang tertinggal).
+    setActiveFateCard(null);
+    setFateDiceResult(null);
+    setCourtDiceResult(null);
+    setShowCourtModal(false);
+    setShowTollModal(false);
+    setTollFeeRefunded(false);
+    setShowBuyUpgradeModal(false);
+    setShowGiveMoneyModal(false);
+    setShowAskMoneyModal(false);
+    setShowDukunModal(false);
+    setSelectedCardToUse(null);
+    setPendingLoanProposal(null);
+    setPendingDebtObligation(null);
 
     const alive = players.filter((p) => p.status !== 'BANGKRUT');
     if (alive.length <= 1) {
@@ -1035,6 +1511,7 @@ export default function App() {
     round,
     durationMode,
     pendingMoneyRequest,
+    pendingLoanProposal,
     autoBotFastMode,
     isRolling,
     isMoving,
@@ -1043,6 +1520,25 @@ export default function App() {
     executeForcedLoanCollection,
     triggerTurnTransition,
   ]);
+
+  // Jadwalkan maju giliran (semua jalur otomatis lewat sini): jadwal baru
+  // menggantikan yang lama, dan saat jatuh tempo bisa dilewati bila ada modal
+  // yang baru terbuka — tick auto-action berikutnya yang akan menanganinya.
+  const scheduleTurnAdvance = useCallback(
+    (delayMs: number, skipIfModalOpen: boolean = false) => {
+      pendingTurnAdvanceTimersRef.current.forEach((timer) =>
+        clearTimeout(timer)
+      );
+      pendingTurnAdvanceTimersRef.current.clear();
+      const timer = setTimeout(() => {
+        pendingTurnAdvanceTimersRef.current.delete(timer);
+        if (skipIfModalOpen && modalFlowBusyRef.current) return;
+        handleNextTurn();
+      }, delayMs);
+      pendingTurnAdvanceTimersRef.current.add(timer);
+    },
+    [handleNextTurn]
+  );
 
   // Evaluate effect of landing on a tile
   const evaluateTileLanding = useCallback(
@@ -1675,7 +2171,8 @@ export default function App() {
         isRolling ||
         isMoving ||
         screen !== 'GAME' ||
-        gameState !== 'playing'
+        gameState !== 'playing' ||
+        turnControlsLocked
       ) {
         return;
       }
@@ -1721,6 +2218,7 @@ export default function App() {
       isMoving,
       screen,
       gameState,
+      turnControlsLocked,
       players,
       activePlayerIndex,
       addLog,
@@ -1773,9 +2271,7 @@ export default function App() {
         showQuickBanner(
           `🔒 Gagal Dadu Kembar (${d1}-${d2}). Tetap di Lapas & giliran selesai!`
         );
-        setTimeout(() => {
-          handleNextTurn();
-        }, 900);
+        scheduleTurnAdvance(900);
       }
     }, 550);
   };
@@ -1956,9 +2452,7 @@ export default function App() {
       );
     }
 
-    setTimeout(() => {
-      handleNextTurn();
-    }, 350);
+    scheduleTurnAdvance(350);
   };
 
   // --- FASE 3: KARTU TAKDIR & MUSIBAH (TERMASUK KARTU BERDADU & DOA ORTU) ---
@@ -2301,9 +2795,9 @@ export default function App() {
         drawFateCard('TAKDIR', true);
       }, 300);
     } else {
-      setTimeout(() => {
-        handleNextTurn();
-      }, 650);
+      // Bila ternyata kartu Doubles menarik kartu Takdir baru (ref masih basi),
+      // jadwal dilewati dan tick auto-action berikutnya yang menanganinya.
+      scheduleTurnAdvance(650, true);
     }
   };
 
@@ -2525,6 +3019,7 @@ export default function App() {
     amount: number,
     reason: string
   ) => {
+    const target = players.find((p) => p.id === targetPlayerId);
     setShowAskMoneyModal(false);
     setPendingMoneyRequest({
       fromPlayerId: activePlayer.id,
@@ -2532,22 +3027,28 @@ export default function App() {
       amount,
       reason,
     });
-    const target = players.find((p) => p.id === targetPlayerId);
+    pendingRequestWriteAtRef.current = Date.now();
     addLog(
-      `🤲 ${activePlayer.name} mengirim pop-up permintaan uang ${formatRupiah(
+      `🤲 ${activePlayer.name} mengirim permintaan uang ${formatRupiah(
         amount
       )} ke ${target?.name ?? 'pemain'}...`,
       'info'
     );
+    if (isOnlineRoom && !target?.isBot) {
+      showQuickBanner(
+        `⏳ Menunggu jawaban ${target?.name ?? 'pemain'} atas permintaan uang...`
+      );
+    }
   };
 
   const handleAcceptMoneyRequest = () => {
-    if (!pendingMoneyRequest) return;
+    if (!pendingMoneyRequest || !canRespondToMoneyRequest) return;
     const { fromPlayerId, toPlayerId, amount, reason } = pendingMoneyRequest;
-    const sender = players.find((p) => p.id === toPlayerId);
-    const receiver = players.find((p) => p.id === fromPlayerId);
+    const sender = playersRef.current.find((p) => p.id === toPlayerId);
+    const receiver = playersRef.current.find((p) => p.id === fromPlayerId);
     if (!sender || !receiver || sender.money < amount) {
       setPendingMoneyRequest(null);
+      pendingRequestWriteAtRef.current = Date.now();
       return;
     }
 
@@ -2577,24 +3078,57 @@ export default function App() {
       }!`
     );
     setPendingMoneyRequest(null);
+    pendingRequestWriteAtRef.current = Date.now();
   };
 
   const handleRejectMoneyRequest = () => {
-    if (!pendingMoneyRequest) return;
-    const sender = players.find((p) => p.id === pendingMoneyRequest.toPlayerId);
-    const receiver = players.find(
-      (p) => p.id === pendingMoneyRequest.fromPlayerId
-    );
+    if (!pendingMoneyRequest || !canRespondToMoneyRequest) return;
+    const { fromPlayerId, toPlayerId, amount } = pendingMoneyRequest;
+    const sender = playersRef.current.find((p) => p.id === toPlayerId);
+    const receiver = playersRef.current.find((p) => p.id === fromPlayerId);
     soundFX.playPenalty();
     addLog(
       `❌ ${sender?.name ?? 'Pemain'} MENOLAK permintaan uang ${formatRupiah(
-        pendingMoneyRequest.amount
+        amount
       )} dari ${receiver?.name ?? 'pemain'}!`,
       'penalty'
     );
     showQuickBanner(`❌ Permintaan uang ditolak oleh ${sender?.name}!`);
     setPendingMoneyRequest(null);
+    pendingRequestWriteAtRef.current = Date.now();
   };
+
+  // Bot tidak punya klien sendiri: permintaan uang ke bot dijawab otomatis di
+  // klien pemohon (terima bila bot mampu, tolak bila saldonya kurang).
+  const botMoneyResponseRef = useRef({
+    accept: handleAcceptMoneyRequest,
+    reject: handleRejectMoneyRequest,
+  });
+  botMoneyResponseRef.current = {
+    accept: handleAcceptMoneyRequest,
+    reject: handleRejectMoneyRequest,
+  };
+  useEffect(() => {
+    if (!isOnlineRoom || !pendingMoneyRequest || !canRespondToMoneyRequest) {
+      return;
+    }
+    const target = playersRef.current.find(
+      (p) => p.id === pendingMoneyRequest.toPlayerId
+    );
+    if (!target?.isBot) return;
+    const request = pendingMoneyRequest;
+    const timer = setTimeout(() => {
+      const latestTarget = playersRef.current.find(
+        (p) => p.id === request.toPlayerId
+      );
+      if (latestTarget && latestTarget.money >= request.amount) {
+        botMoneyResponseRef.current.accept();
+      } else {
+        botMoneyResponseRef.current.reject();
+      }
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [isOnlineRoom, pendingMoneyRequest, canRespondToMoneyRequest]);
 
   // --- FASE 3: 10 KARTU SIMPANAN HANDLERS ---
   const handleApplyDukunDiceChange = (dieIndex: number, newValue: number) => {
@@ -3004,14 +3538,23 @@ export default function App() {
       lenderId: lender.id,
       principal: actualPrincipal,
     });
+    pendingRequestWriteAtRef.current = Date.now();
+    addLog(
+      `🤲💸 ${borrower.name} mengajukan pinjaman ${formatRupiah(
+        actualPrincipal
+      )} ke ${lender.name}. Menunggu persetujuan ${
+        lender.isBot ? 'sistem (bot)' : lender.name
+      }...`,
+      'info'
+    );
   };
 
   const handleApproveLoanWithInterest = (interestRate: number) => {
-    if (!pendingLoanProposal) return;
+    if (!pendingLoanProposal || !canRespondToLoanProposal) return;
     const { borrowerId, lenderId, principal } = pendingLoanProposal;
     const totalDue = calculateLoanTotalDue(principal, interestRate);
-    const borrower = players.find((p) => p.id === borrowerId);
-    const lender = players.find((p) => p.id === lenderId);
+    const borrower = playersRef.current.find((p) => p.id === borrowerId);
+    const lender = playersRef.current.find((p) => p.id === lenderId);
 
     soundFX.playCashIn();
     const newLoan: LoanRecord = {
@@ -3034,6 +3577,7 @@ export default function App() {
       })
     );
     setPendingLoanProposal(null);
+    pendingRequestWriteAtRef.current = Date.now();
 
     addLog(
       `🤝💸 PINJAMAN RENTENIR CAIR! ${lender?.name} meminjamkan ${formatRupiah(
@@ -3051,8 +3595,10 @@ export default function App() {
   };
 
   const handleRejectLoanProposal = () => {
-    if (!pendingLoanProposal) return;
-    const lender = players.find((p) => p.id === pendingLoanProposal.lenderId);
+    if (!pendingLoanProposal || !canRespondToLoanProposal) return;
+    const lender = playersRef.current.find(
+      (p) => p.id === pendingLoanProposal.lenderId
+    );
     soundFX.playPenalty();
     addLog(
       `❌ ${lender?.name ?? 'Pemain'} menolak memberikan pinjaman utang!`,
@@ -3060,6 +3606,7 @@ export default function App() {
     );
     showQuickBanner(`❌ Pengajuan pinjaman ditolak oleh ${lender?.name}!`);
     setPendingLoanProposal(null);
+    pendingRequestWriteAtRef.current = Date.now();
   };
 
   const handleSettlePendingObligation = () => {
@@ -3196,7 +3743,9 @@ export default function App() {
       gameState !== 'playing' ||
       isRolling ||
       isMoving ||
-      isLandingPause
+      isLandingPause ||
+      // Kepemilikan giliran: klien lain tidak boleh menjalankan aksi pemain aktif
+      !isMyTurnToAct
     )
       return;
 
@@ -3208,7 +3757,7 @@ export default function App() {
       } else {
         handleDeclareBankruptcyFromCrisis();
       }
-      setTimeout(() => handleNextTurn(), 350);
+      scheduleTurnAdvance(350, true);
       return;
     }
 
@@ -3217,9 +3766,15 @@ export default function App() {
       if (activeFateCard.card.requiresDice && fateDiceResult === null) {
         const autoD = Math.floor(Math.random() * 6) + 1;
         setFateDiceResult(autoD);
+        // Dadu disimpan dulu; tick berikutnya yang mengonfirmasi kartu dengan
+        // angka yang sama (dulu angka tampilan & efek bisa berbeda).
+        return;
       }
       handleConfirmFateCard();
-      setTimeout(() => handleNextTurn(), 400);
+      // Majukan giliran hanya bila kartu tidak membuka rantai berikutnya
+      // (Pengadilan, kartu Doubles, atau krisis keuangan) — kalau terbuka,
+      // tick auto-action berikutnya yang akan menanganinya.
+      scheduleTurnAdvance(400, true);
       return;
     }
 
@@ -3268,7 +3823,7 @@ export default function App() {
         `⏱️⚖️ [Otomatis] ${activePlayer.name}: ${verdict.verdictTitle}`,
         verdict.sendToJail ? 'penalty' : 'gain'
       );
-      setTimeout(() => handleNextTurn(), 400);
+      scheduleTurnAdvance(400, true);
       return;
     }
 
@@ -3316,7 +3871,7 @@ export default function App() {
         setShowBuyUpgradeModal(false);
         setStartUpgradeBanner(false);
       }
-      setTimeout(() => handleNextTurn(), 350);
+      scheduleTurnAdvance(350, true);
       return;
     }
 
@@ -3362,6 +3917,8 @@ export default function App() {
     showQuickBanner,
     handleNextTurn,
     handleRollDice,
+    scheduleTurnAdvance,
+    isMyTurnToAct,
     handleSettlePendingObligation,
     handleDeclareBankruptcyFromCrisis,
     handleConfirmFateCard,
@@ -3448,6 +4005,27 @@ export default function App() {
     showQuickBanner('Keluar dari akun Google.');
   };
 
+  // Bubarkan room online (khusus Host): hapus dokumen room dari Firestore,
+  // semua pemain otomatis keluar lewat callback onDeleted di langganan snapshot.
+  const handleDeleteOnlineRoom = useCallback(async () => {
+    if (!roomCode) return;
+    try {
+      await deleteFirestoreRoom(roomCode);
+      showQuickBanner(
+        `🗑️ Room #${roomCode} resmi dibubarkan. Sampai jumpa di perang berikutnya, Warga!`
+      );
+    } catch (err) {
+      console.warn('Delete online room warning:', err);
+      showQuickBanner(`⚠️ Gagal menghapus Room #${roomCode}. Coba lagi ya.`);
+      return;
+    }
+    setIsOnlineRoom(false);
+    setRoomCode('');
+    setIsHost(false);
+    setGameState('title');
+    setScreen('LOBBY');
+  }, [roomCode, showQuickBanner]);
+
   // Helper untuk menyimpan & membaca Room lokal di localStorage (agar tab/sesi lokal juga sinkron)
   const saveLocalRoomCache = useCallback(
     (
@@ -3514,8 +4092,33 @@ export default function App() {
       setFirebaseUser(currentUser);
     }
 
-    const generatedCode = generateRoomCode();
     const hostUid = currentUser.uid;
+
+    // ANTI-TABRAKAN: kode `WNI-XXX` cuma punya 900 kombinasi. Pastikan kode belum
+    // dipakai room lain di Firestore sebelum membuat; kalau tabrakan, generate ulang
+    // (maksimal 3 percobaan) supaya tidak menimpa/menolak create.
+    let generatedCode = generateRoomCode();
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const existingRoom = await fetchFirestoreRoom(generatedCode);
+        if (!existingRoom) break;
+        generatedCode = generateRoomCode();
+        if (attempt === 2) {
+          setLobbyError(
+            'Kode room sedang bentrok terus-menerus (kebetulan padat). Coba lagi beberapa saat lagi, Warga!'
+          );
+          setIsLobbyBusy(false);
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('Room code availability check error:', err);
+      setLobbyError(
+        'Gagal memeriksa kode room di server. Periksa koneksi internet Anda.'
+      );
+      setIsLobbyBusy(false);
+      return;
+    }
 
     // WAJIB HANYA 1 PEMAIN (HOST) — DILARANG MEMASUKKAN BOT OTOMATIS SAAT BUAT ROOM BARU!
     const initialRoomPlayers = createHostOnlyRoomPlayers({
@@ -3888,9 +4491,12 @@ export default function App() {
       }
     }
 
-    setScreen('GAME');
+    const targetScreen = resolveGameStartTargetScreen({
+      introMovieEnabled,
+    });
+    setScreen(targetScreen);
     setGameState('playing');
-    if (players[0]) {
+    if (targetScreen === 'GAME' && players[0]) {
       triggerTurnTransition(players[0], 1);
     }
   };
@@ -3899,10 +4505,28 @@ export default function App() {
     setTurnSeconds(60);
     setScreen('GAME');
     setGameState('playing');
+    if (isOnlineRoom) {
+      // Host tetap menjadi pemilik giliran pertama. Guest cukup masuk ke papan;
+      // transisi giliran akan mengikuti snapshot Host agar tidak tampil ganda.
+      if (isHost) {
+        const openingPlayer = players[activePlayerIndex] || players[0];
+        if (openingPlayer) {
+          triggerTurnTransition(openingPlayer, Math.max(1, round));
+        }
+      }
+      return;
+    }
     if (players[0]) {
       triggerTurnTransition(players[0], 1);
     }
-  }, [players, triggerTurnTransition]);
+  }, [
+    players,
+    activePlayerIndex,
+    round,
+    isOnlineRoom,
+    isHost,
+    triggerTurnTransition,
+  ]);
 
   const handleUploadIntroMovie = useCallback(
     async (file: File) => {
@@ -3941,10 +4565,15 @@ export default function App() {
 
   // Restart full simulation
   const handleRestartGame = useCallback(() => {
+    // Online: hanya Host yang boleh me-restart seluruh room (tamunya tidak).
+    if (isOnlineRoom && !isHost) return;
     if (landingPauseTimerRef.current) {
       clearTimeout(landingPauseTimerRef.current);
       landingPauseTimerRef.current = null;
     }
+    // Batalkan semua penjadwalan maju giliran yang masih tertunda.
+    pendingTurnAdvanceTimersRef.current.forEach((timer) => clearTimeout(timer));
+    pendingTurnAdvanceTimersRef.current.clear();
     rollLockRef.current = false;
     setHasRolledThisTurn(false);
     setTurnPhase('READY_TO_ROLL');
@@ -4000,6 +4629,7 @@ export default function App() {
     setShowDukunModal(false);
     setPendingDebtObligation(null);
     setPendingLoanProposal(null);
+    pendingRequestWriteAtRef.current = Date.now();
     setLoans([]);
     setShowLoanManagerModal(false);
     setSelectedTileModal(null);
@@ -4008,7 +4638,7 @@ export default function App() {
       `🔄 Permainan di Room #${roomCode} diulang dari awal! Semua warga kembali bermodal Rp10 Jt & 10 Kartu Simpanan.`,
       'info'
     );
-  }, [addLog, roomCode]);
+  }, [addLog, roomCode, isOnlineRoom, isHost]);
 
   // Fullscreen API sync & toggle handler
   useEffect(() => {
@@ -4549,7 +5179,7 @@ export default function App() {
 
       {/* FLOATING NOTIFICATION TOAST BANNER */}
       {toastBanner && screen === 'GAME' && gameState === 'playing' && (
-        <div className="fixed top-28 left-1/2 -translate-x-1/2 z-40 pointer-events-none px-3.5 py-1.5 rounded-xl bg-amber-400 text-stone-950 font-black text-xs sm:text-sm shadow-2xl border-2 border-white animate-bounce">
+        <div className="fixed top-28 left-1/2 -translate-x-1/2 z-40 pointer-events-none max-w-[92vw] px-3.5 py-1.5 rounded-xl bg-amber-400 text-stone-950 font-black text-xs sm:text-sm text-center shadow-2xl border-2 border-white animate-bounce">
           {toastBanner}
         </div>
       )}
@@ -4622,8 +5252,9 @@ export default function App() {
             {!hasRolledThisTurn && turnPhase === 'READY_TO_ROLL' && !activePlayer.isBot ? (
               <button
                 type="button"
+                disabled={turnControlsLocked}
                 onClick={() => handleRollDice(false)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-stone-950 font-black text-xs shadow cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-black text-xs shadow cursor-pointer"
               >
                 <Dices className="w-3.5 h-3.5" />
                 <span>LEMPAR DADU</span>
@@ -4631,7 +5262,7 @@ export default function App() {
             ) : (
               <button
                 type="button"
-                disabled={isRolling || isMoving || isLandingPause}
+                disabled={isRolling || isMoving || isLandingPause || turnControlsLocked}
                 onClick={handleNextTurn}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-stone-950 font-black text-xs shadow cursor-pointer"
               >
@@ -4720,6 +5351,12 @@ export default function App() {
                   type="button"
                   data-testid="hud-duration-mode-btn"
                   onClick={() => {
+                    if (isOnlineRoom && !isHost) {
+                      showQuickBanner(
+                        '⏱️ Hanya Host yang bisa mengganti Mode Durasi di room online.'
+                      );
+                      return;
+                    }
                     const idx = DURATION_MODE_OPTIONS.findIndex(
                       (m) => m.id === durationMode
                     );
@@ -4984,6 +5621,7 @@ export default function App() {
                       <div
                         key={p.id}
                         data-testid={`mobile-player-card-${p.id}`}
+                        data-hover-popup-anchor="true"
                         onMouseEnter={(e) =>
                           handleHoverPlayer(p, e.clientX, e.clientY)
                         }
@@ -5159,6 +5797,7 @@ export default function App() {
                       <div
                         key={p.id}
                         data-testid={`player-card-${p.id}`}
+                        data-hover-popup-anchor="true"
                         onMouseEnter={(e) =>
                           handleHoverPlayer(p, e.clientX, e.clientY)
                         }
@@ -5585,10 +6224,12 @@ export default function App() {
                 <button
                   type="button"
                   data-testid="next-turn-btn"
-                  disabled={isRolling || isMoving || isLandingPause}
+                  disabled={
+                    isRolling || isMoving || isLandingPause || turnControlsLocked
+                  }
                   onClick={handleNextTurn}
                   className={`flex items-center gap-1.5 px-3.5 py-1.5 sm:py-2 rounded-xl font-black text-[11px] sm:text-xs shadow cursor-pointer whitespace-nowrap shrink-0 transition-all ${
-                    isRolling || isMoving || isLandingPause
+                    isRolling || isMoving || isLandingPause || turnControlsLocked
                       ? 'bg-stone-800/70 border border-stone-600 text-stone-400 opacity-50 cursor-not-allowed pointer-events-none'
                       : hasRolledThisTurn
                       ? 'bg-gradient-to-r from-amber-400 via-yellow-300 to-amber-400 text-stone-950 border-2 border-white ring-2 ring-amber-300 shadow-[0_0_20px_rgba(251,191,36,0.85)] animate-pulse'
@@ -5620,19 +6261,23 @@ export default function App() {
                   disabled={
                     hasRolledThisTurn ||
                     turnPhase !== 'READY_TO_ROLL' ||
-                    Boolean(activePlayer.isBot)
+                    Boolean(activePlayer.isBot) ||
+                    turnControlsLocked
                   }
                   onClick={() => handleRollDice(false)}
                   className={`flex items-center justify-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl font-black text-xs sm:text-sm tracking-wide transition-all whitespace-nowrap shrink-0 ${
                     hasRolledThisTurn ||
                     turnPhase !== 'READY_TO_ROLL' ||
-                    Boolean(activePlayer.isBot)
+                    Boolean(activePlayer.isBot) ||
+                    turnControlsLocked
                       ? 'bg-stone-700 text-stone-300 border border-stone-500 opacity-50 cursor-not-allowed pointer-events-none shadow-none'
                       : 'bg-amber-400 hover:bg-amber-300 active:translate-y-0.5 text-stone-950 shadow-[0_4px_0_#b45309] cursor-pointer'
                   }`}
                 >
                   {hasRolledThisTurn ? (
                     <span>🚫 SUDAH LEMPAR (1x)</span>
+                  ) : turnControlsLocked ? (
+                    <span>⏳ BUKAN GILIRANMU</span>
                   ) : (
                     <>
                       <Dices className="w-4 h-4 shrink-0" />
@@ -5717,7 +6362,7 @@ export default function App() {
           showAskMoneyModal={showAskMoneyModal}
           onCloseAskMoneyModal={() => setShowAskMoneyModal(false)}
           onSendAskMoneyRequest={handleSendAskMoneyRequest}
-          pendingMoneyRequest={pendingMoneyRequest}
+          pendingMoneyRequest={visibleMoneyRequest}
           onAcceptMoneyRequest={handleAcceptMoneyRequest}
           onRejectMoneyRequest={handleRejectMoneyRequest}
           showTollModal={showTollModal}
@@ -5748,7 +6393,7 @@ export default function App() {
           onSellBuildingForCash={handleSellBuildingForCash}
           onSellLandForCash={handleSellLandForCash}
           onRequestLoanFromPlayer={handleRequestLoanFromPlayer}
-          pendingLoanProposal={pendingLoanProposal}
+          pendingLoanProposal={visibleLoanProposal}
           onApproveLoanWithInterest={handleApproveLoanWithInterest}
           onRejectLoanProposal={handleRejectLoanProposal}
           onSettlePendingObligation={handleSettlePendingObligation}
@@ -5762,6 +6407,10 @@ export default function App() {
           durationMode={durationMode}
           gameOverReason={gameOverReason}
           customAssets={customAssets}
+          isOnlineRoom={isOnlineRoom}
+          isHost={isHost}
+          onlineRoomCode={roomCode}
+          onDeleteOnlineRoom={handleDeleteOnlineRoom}
         />
       )}
 

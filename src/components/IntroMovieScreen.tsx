@@ -47,6 +47,7 @@ export const IntroMovieScreen: React.FC<IntroMovieScreenProps> = ({
   const [currentTimeSec, setCurrentTimeSec] = useState<number>(0);
   const [durationSec, setDurationSec] = useState<number>(7);
   const [isExiting, setIsExiting] = useState<boolean>(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
 
   const defaultAsset = getDefaultIntroMovieAsset();
   const activeVideoUrl = customAssets.introMovieUrl || defaultAsset.url;
@@ -73,16 +74,31 @@ export const IntroMovieScreen: React.FC<IntroMovieScreenProps> = ({
   useEffect(() => {
     const vid = videoRef.current;
     if (!vid) return;
-    vid.currentTime = 0;
-    const playPromise = vid.play();
-    if (playPromise && typeof playPromise.catch === 'function') {
-      playPromise.catch(() => {
-        // Fallback if browser requires muted autoplay
-        vid.muted = true;
-        setIsMuted(true);
-        vid.play().catch(() => {});
-      });
+    setVideoError(null);
+    try {
+      vid.currentTime = 0;
+    } catch {
+      // Sebagian browser melempar error bila metadata video belum siap.
     }
+    const tryPlay = () => {
+      const playPromise = vid.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {
+          // Fallback if browser requires muted autoplay
+          vid.muted = true;
+          setIsMuted(true);
+          vid.play().catch(() => {
+            // Autoplay tetap diblokir browser: biarkan pengguna menekan
+            // tombol Putar atau langsung LEWATI MOVIE.
+          });
+        });
+      }
+    };
+    tryPlay();
+    // Beberapa browser butuh dipanggil lagi setelah metadata siap.
+    const onReady = () => tryPlay();
+    vid.addEventListener('loadeddata', onReady, { once: true });
+    return () => vid.removeEventListener('loadeddata', onReady);
   }, [activeVideoUrl]);
 
   useEffect(() => {
@@ -257,8 +273,14 @@ export const IntroMovieScreen: React.FC<IntroMovieScreenProps> = ({
             src={activeVideoUrl}
             autoPlay
             playsInline
+            preload="auto"
             muted={isMuted}
             data-testid="intro-movie-video"
+            onError={() =>
+              setVideoError(
+                'Video opening gagal diputar. Periksa file /intro-wni-simulator.mp4 atau tekan tombol LEWATI MOVIE.'
+              )
+            }
             onTimeUpdate={(e) => {
               const el = e.currentTarget;
               setCurrentTimeSec(el.currentTime);
@@ -292,6 +314,12 @@ export const IntroMovieScreen: React.FC<IntroMovieScreenProps> = ({
               </div>
             </div>
           </div>
+
+          {videoError && (
+            <div className="absolute inset-x-4 top-20 z-20 rounded-xl border border-rose-400/70 bg-rose-950/90 px-4 py-3 text-center text-xs font-bold text-rose-100">
+              {videoError}
+            </div>
+          )}
 
           {/* BOTTOM VIDEO PROGRESS BAR */}
           <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent pt-6 pb-2.5 px-4 pointer-events-none">

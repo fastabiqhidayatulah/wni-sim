@@ -27,6 +27,7 @@ import {
   generateBotPlayers,
   generateRoomCode,
   createHostOnlyRoomPlayers,
+  deriveMemberUids,
   removeBotFromRoom,
   removeAllBotsFromRoom,
   resolveHumanJoinRoomPlayers,
@@ -485,6 +486,49 @@ test('Public server avatar folder (/public/avatars/) maps single or multiple upl
     ),
     '/avatars/ojol.png'
   );
+});
+
+test('deriveMemberUids: hanya uid manusia, tanpa duplikat, maksimal 64 entri', () => {
+  // 1. Room khas: host manusia + beberapa bot → hanya uid manusia yang masuk
+  const hostOnly = createHostOnlyRoomPlayers({
+    hostName: 'Bang Jago',
+    avatarId: 'ojol',
+    uid: 'uid-host-1',
+  });
+  const withBots = generateBotPlayers(hostOnly, 3, 8);
+  assert.deepEqual(deriveMemberUids(withBots), ['uid-host-1']);
+
+  // 2. Bot tidak pernah ikut, walau uid-nya unik ('p-N')
+  const memberList = deriveMemberUids(withBots);
+  assert.ok(
+    withBots.filter((p) => p.isBot).every((b) => !memberList.includes(String(b.uid)))
+  );
+
+  // 3. Setelah join, uid joiner ikut; setelah bot digantikan manusia, uid manusia bertambah
+  const joined = resolveHumanJoinRoomPlayers({
+    existingPlayers: withBots,
+    maxPlayers: 8,
+    joiningPlayer: { name: 'Si Cepot', avatarId: 'cepot', uid: 'uid-guest-2' },
+  });
+  assert.ok(joined.ok);
+  const memberUids = deriveMemberUids(joined.updatedPlayers);
+  assert.deepEqual(memberUids, ['uid-host-1', 'uid-guest-2']);
+
+  // 4. Tidak ada duplikat & tersanitasi (maks 64 entri, string maks 128 karakter)
+  const dupPlayers = [
+    ...joined.updatedPlayers,
+    { ...joined.updatedPlayers[0], isBot: false },
+  ];
+  assert.equal(new Set(deriveMemberUids(dupPlayers)).size, 2);
+
+  const longUid = 'x'.repeat(200);
+  const longUidPlayer = createPlayerFromAvatar({
+    id: 9,
+    name: 'Warga',
+    avatarId: 'ojol',
+    uid: longUid,
+  });
+  assert.equal(deriveMemberUids([longUidPlayer])[0].length, 128);
 });
 
 

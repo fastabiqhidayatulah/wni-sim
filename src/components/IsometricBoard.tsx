@@ -504,6 +504,7 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                 tabIndex={0}
                 data-testid={`board-tile-${tile.id}`}
                 data-just-landed={isJustLanded ? 'true' : undefined}
+                data-hover-popup-anchor="true"
                 onMouseEnter={(e) => {
                   if (!isTitleScreen) {
                     onHoverTile?.(tile, e.clientX, e.clientY);
@@ -669,6 +670,7 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                           <div
                             key={p.id}
                             data-testid={`player-standee-${p.id}`}
+                            data-hover-popup-anchor="true"
                             onMouseEnter={(e) => {
                               if (!isTitleScreen) {
                                 e.stopPropagation();
@@ -687,7 +689,10 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                               if (!isTitleScreen) {
                                 e.stopPropagation();
                                 onHoverPlayer?.(null);
-                                onHoverTile?.(tile, e.clientX, e.clientY);
+                                // Jangan paksa set hover petak di sini: kursor
+                                // bisa saja sudah keluar papan. Petak akan
+                                // menghidupkan popupnya sendiri lewat onMouseMove.
+                                onHoverTile?.(null);
                               }
                             }}
                             className="relative flex flex-col items-center justify-center pointer-events-auto cursor-pointer group/pawn"
@@ -727,39 +732,57 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                               }}
                             >
                               {/* Standee Figure Body / Acrylic Cutout */}
-                              <div
-                                className={`relative flex flex-col items-center justify-center w-8 h-10 sm:w-9 sm:h-11 rounded-t-xl rounded-b-md border-2 border-white shadow-xl overflow-hidden ${
-                                  isCurrentTurn
-                                    ? 'ring-2 ring-yellow-300'
-                                    : 'group-hover/pawn:ring-2 group-hover/pawn:ring-amber-300'
-                                }`}
-                                style={{
-                                  background: `linear-gradient(180deg, ${p.color} 0%, #1c1917 100%)`,
-                                  boxShadow: '0 6px 12px rgba(0,0,0,0.55)',
-                                }}
-                              >
-                                {(() => {
-                                  const pawnImgUrl = getPawnAvatarImageUrl(
-                                    p.avatarId,
-                                    customAssets
+                              {(() => {
+                                const pawnImgUrl = getPawnAvatarImageUrl(
+                                  p.avatarId,
+                                  customAssets
+                                );
+                                if (pawnImgUrl) {
+                                  // PNG ber-alpha ditampilkan apa adanya: tanpa
+                                  // kartu/background warna pemain, sehingga
+                                  // bentuk karakter terlihat transparan di papan.
+                                  return (
+                                    <div className="relative flex flex-col items-center">
+                                      <img
+                                        src={pawnImgUrl}
+                                        alt={p.name}
+                                        className="w-9 h-9 sm:w-10 sm:h-10 object-contain"
+                                        style={{
+                                          filter: isCurrentTurn
+                                            ? 'drop-shadow(0 0 4px #fde047) drop-shadow(0 5px 5px rgba(0,0,0,0.65))'
+                                            : 'drop-shadow(0 5px 5px rgba(0,0,0,0.65))',
+                                        }}
+                                      />
+                                      <span
+                                        className="mt-0.5 px-1 rounded bg-black/75 text-[6.5px] font-extrabold text-white uppercase tracking-tighter leading-none"
+                                        style={{ border: `1px solid ${p.color}` }}
+                                      >
+                                        P{p.id + 1}
+                                      </span>
+                                    </div>
                                   );
-                                  return pawnImgUrl ? (
-                                    <img
-                                      src={pawnImgUrl}
-                                      alt={p.name}
-                                      className="w-full h-7 sm:h-8 object-contain p-0.5 rounded"
-                                      style={{ backgroundColor: p.color }}
-                                    />
-                                  ) : (
+                                }
+                                return (
+                                  <div
+                                    className={`relative flex flex-col items-center justify-center w-8 h-10 sm:w-9 sm:h-11 rounded-t-xl rounded-b-md border-2 border-white shadow-xl overflow-hidden ${
+                                      isCurrentTurn
+                                        ? 'ring-2 ring-yellow-300'
+                                        : 'group-hover/pawn:ring-2 group-hover/pawn:ring-amber-300'
+                                    }`}
+                                    style={{
+                                      background: `linear-gradient(180deg, ${p.color} 0%, #1c1917 100%)`,
+                                      boxShadow: '0 6px 12px rgba(0,0,0,0.55)',
+                                    }}
+                                  >
                                     <span className="text-sm sm:text-base leading-none drop-shadow">
                                       {p.avatarEmoji}
                                     </span>
-                                  );
-                                })()}
-                                <span className="mt-0.5 px-1 rounded bg-black/75 text-[6.5px] font-extrabold text-white uppercase tracking-tighter leading-none">
-                                  P{p.id + 1}
-                                </span>
-                              </div>
+                                    <span className="mt-0.5 px-1 rounded bg-black/75 text-[6.5px] font-extrabold text-white uppercase tracking-tighter leading-none">
+                                      P{p.id + 1}
+                                    </span>
+                                  </div>
+                                );
+                              })()}
 
                               {/* Standee Pedestal Base */}
                               <div
@@ -865,6 +888,7 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                 role="button"
                 tabIndex={0}
                 data-testid="board-tile-40"
+                data-hover-popup-anchor="true"
                 onMouseEnter={(e) => {
                   if (!isTitleScreen) {
                     onHoverTile?.(BEKASI_CENTER_TILE, e.clientX, e.clientY);
@@ -933,6 +957,7 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                       <div
                         key={p.id}
                         data-testid={`bekasi-player-standee-${p.id}`}
+                        data-hover-popup-anchor="true"
                         onMouseEnter={(e) => {
                           if (!isTitleScreen) {
                             e.stopPropagation();
@@ -951,7 +976,7 @@ export const IsometricBoard: React.FC<IsometricBoardProps> = ({
                           if (!isTitleScreen) {
                             e.stopPropagation();
                             onHoverPlayer?.(null);
-                            onHoverTile?.(BEKASI_CENTER_TILE, e.clientX, e.clientY);
+                            onHoverTile?.(null);
                           }
                         }}
                         className="flex flex-col items-center cursor-pointer"
